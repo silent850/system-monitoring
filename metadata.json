@@ -1,0 +1,6 @@
+{
+  "name": "Uptime Monitor",
+  "description": "A robust full-stack uptime monitoring tool featuring proxy-based rotation, historical logging, and email alerts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
