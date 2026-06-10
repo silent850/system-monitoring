@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, FormEvent } from 'react';
 import { AppConfig } from '../types';
 import axios from 'axios';
 import { Save, Loader2, AlertCircle } from 'lucide-react';
@@ -41,7 +41,7 @@ export default function Settings() {
     }
   };
 
-  const handleSave = async (e: React.FormEvent) => {
+  const handleSave = async (e: FormEvent) => {
     e.preventDefault();
     setSaving(true);
     setMessage('');
@@ -141,11 +141,11 @@ export default function Settings() {
                 value={proxiesInput}
                 onChange={(e) => setProxiesInput(e.target.value)}
                 className="w-full h-32 bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none font-mono text-sm leading-relaxed"
-                placeholder="http://user:pass@192.168.1.1:8080&#10;10.0.0.1:3128"
+                placeholder="http://username:password@p.webshare.io:80&#10;http://user:pass@192.168.1.1:8080&#10;10.0.0.1:3128"
               />
               <div className="mt-2 flex items-start gap-2 text-xs text-slate-500">
                 <AlertCircle className="w-4 h-4 shrink-0 text-amber-500" />
-                <p>To avoid regional blocks, the monitor will randomly rotate through these proxies on every check. If left empty, direct connections are used.</p>
+                <p>Supports formats: full URL with auth (http://user:pass@host:port), host:port (for unauthenticated proxies), or plain IP:port. For Webshare.io rotating proxies, use the full URL format.</p>
               </div>
             </div>
 

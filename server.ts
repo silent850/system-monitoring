@@ -8,6 +8,8 @@ import { AppConfig, UptimeLog, CrawledLink } from './src/types';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import fs from 'fs';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
 import { initializeApp } from 'firebase/app';
 import { getFirestore, doc, setDoc, getDoc, collection, getDocs, addDoc, query, orderBy, limit, writeBatch } from 'firebase/firestore';
 
@@ -15,6 +17,8 @@ dotenv.config();
 
 // Initialize Firebase if configured
 let db: any = null;
+const JWT_SECRET = process.env.JWT_SECRET || 'uptime-monitor-fallback-secret-key-2024';
+
 try {
   const configPath = path.join(process.cwd(), 'firebase-applet-config.json');
   if (fs.existsSync(configPath)) {
@@ -40,8 +44,39 @@ let appConfig: AppConfig = {
 
 let uptimeLogs: UptimeLog[] = [];
 const MAX_LOGS = 1000;
+const MAX_CRAWLED_LINKS = 5000;
 
 let crawledLinksCache: CrawledLink[] = [];
+
+const trimCrawledLinksCache = async () => {
+  if (crawledLinksCache.length > MAX_CRAWLED_LINKS) {
+    const mapped = crawledLinksCache.map((link, index) => ({ link, index }));
+    mapped.sort((a, b) => {
+      const aTime = a.link.lastChecked ? new Date(a.link.lastChecked).getTime() : 0;
+      const bTime = b.link.lastChecked ? new Date(b.link.lastChecked).getTime() : 0;
+      
+      if (aTime > 0 && bTime > 0) return bTime - aTime;
+      if (aTime === 0 && bTime === 0) return b.index - a.index;
+      if (aTime === 0) return -1;
+      return 1;
+    });
+
+    const toRemove = mapped.slice(MAX_CRAWLED_LINKS).map(m => m.link);
+    crawledLinksCache = mapped.slice(0, MAX_CRAWLED_LINKS).map(m => m.link);
+
+    if (db && toRemove.length > 0) {
+       try {
+         const batch = writeBatch(db);
+         for (const link of toRemove) {
+           batch.delete(doc(db, 'crawled_links', link.id));
+         }
+         await batch.commit();
+       } catch (e) {
+         console.error('Failed to clear old crawled links from DB:', e);
+       }
+    }
+  }
+};
 
 
 // Database Persistence Helpers
@@ -67,6 +102,23 @@ const loadStateFromDB = async () => {
     const linksSnap = await getDocs(linksQuery);
     crawledLinksCache = linksSnap.docs.map(d => d.data() as CrawledLink);
     console.log(`Loaded ${crawledLinksCache.length} crawled links from DB`);
+    await trimCrawledLinksCache();
+
+    // Check for users and seed admin if none
+    const usersSnap = await getDocs(query(collection(db, 'users'), limit(1)));
+    if (usersSnap.empty) {
+      const adminPasswordRaw = 'admin123';
+      const passwordHash = await bcrypt.hash(adminPasswordRaw, 10);
+      const adminUser = {
+        id: crypto.randomUUID(),
+        email: 'admin@example.com',
+        passwordHash,
+        createdAt: new Date().toISOString()
+      };
+      await setDoc(doc(db, 'users', adminUser.id), adminUser);
+      console.log(`Seeded default admin user: admin@example.com / ${adminPasswordRaw}`);
+    }
+
   } catch (err) {
     console.error('Failed to sync state with DB:', err);
   }
@@ -195,6 +247,11 @@ const discoverLinks = async (targetUrl: string, parentUrl: string, html: string,
          continue;
       }
 
+      if (crawledLinksCache.length >= MAX_CRAWLED_LINKS) {
+        console.warn(`[Crawler] Max crawled links limit (${MAX_CRAWLED_LINKS}) reached. Skipping adding new links.`);
+        break;
+      }
+
       const newLink: CrawledLink = { 
         id,
         parentUrl,
@@ -208,11 +265,17 @@ const discoverLinks = async (targetUrl: string, parentUrl: string, html: string,
       };
 
       crawledLinksCache.push(newLink);
+      await trimCrawledLinksCache();
       await persistCrawledLinkToDB(newLink);
     } catch (e) {
       // Invalid URL syntax
     }
   }
+};
+
+const maskProxyUrl = (proxyUrl: string | null): string | null => {
+  if (!proxyUrl) return null;
+  return proxyUrl.replace(/:([^:@]+)@/, ':****@');
 };
 
 const processSubLinks = async (targetUrl: string, proxyAgent: any) => {
@@ -249,7 +312,7 @@ const processSubLinks = async (targetUrl: string, proxyAgent: any) => {
         status: 'up',
         timestamp: link.lastChecked,
         responseTime,
-        proxyUsed: proxyAgent ? (proxyAgent as any).proxy?.href || 'Proxy' : null,
+        proxyUsed: proxyAgent ? maskProxyUrl((proxyAgent as any).proxy?.href || 'Proxy') : null,
         isSubLink: true,
         parentUrl: targetUrl
       };
@@ -277,7 +340,7 @@ const processSubLinks = async (targetUrl: string, proxyAgent: any) => {
         status: 'down',
         timestamp: link.lastChecked,
         responseTime,
-        proxyUsed: proxyAgent ? (proxyAgent as any).proxy?.href || 'Proxy' : null,
+        proxyUsed: proxyAgent ? maskProxyUrl((proxyAgent as any).proxy?.href || 'Proxy') : null,
         errorDetails: errorMsg,
         isSubLink: true,
         parentUrl: targetUrl
@@ -305,15 +368,22 @@ const checkUrls = async () => {
 
     // Pick a random proxy if available
     if (appConfig.proxies.length > 0) {
-      const randomIndex = Math.floor(Math.random() * appConfig.proxies.length);
-      proxyUsed = appConfig.proxies[randomIndex];
-      // Construct proxy agent
-      try {
-        // Only use agent if proxy is actually valid HTTP/HTTPS url
-        const proxyUrlString = proxyUsed.startsWith('http') ? proxyUsed : `http://${proxyUsed}`;
-        proxyAgent = new HttpsProxyAgent(proxyUrlString);
-      } catch (err) {
-        console.warn('Invalid proxy format, falling back to direct connection:', proxyUsed);
+      const shuffledProxies = [...appConfig.proxies].sort(() => 0.5 - Math.random());
+      
+      for (const proxy of shuffledProxies) {
+        try {
+          const proxyUrlString = proxy.startsWith('http') ? proxy : `http://${proxy}`;
+          new URL(proxyUrlString); // Validate URL parsing
+          proxyAgent = new HttpsProxyAgent(proxyUrlString);
+          proxyUsed = maskProxyUrl(proxy);
+          break; // Successfully created, break out of loop
+        } catch (err) {
+          console.warn(`Invalid proxy format, skipping: ${proxy}`);
+        }
+      }
+      
+      if (!proxyAgent) {
+        console.warn('All proxies invalid, falling back to direct connection.');
       }
     }
 
@@ -394,12 +464,138 @@ const restartMonitoringLoop = () => {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json());
 
+  // Auth middleware
+  const requireAuth = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
+    }
+    const token = authHeader.substring(7);
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      (req as any).user = decoded;
+      next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    }
+  };
+
+  // Auth Routes
+  const authRouter = express.Router();
+  
+  authRouter.post('/login', async (req, res) => {
+    const { email, password } = req.body;
+    if (!db) return res.status(500).json({ error: 'Database not initialized' });
+    
+    try {
+      const usersQuery = query(collection(db, 'users'));
+      const usersSnap = await getDocs(usersQuery);
+      let foundUser = null;
+      for (const d of usersSnap.docs) {
+        if (d.data().email === email) {
+          foundUser = d.data();
+          break;
+        }
+      }
+      
+      if (!foundUser) return res.status(401).json({ error: 'Invalid credentials' });
+      
+      const pwdMatch = await bcrypt.compare(password, foundUser.passwordHash);
+      if (!pwdMatch) return res.status(401).json({ error: 'Invalid credentials' });
+      
+      const token = jwt.sign({ email: foundUser.email, id: foundUser.id }, JWT_SECRET, { expiresIn: '24h' });
+      res.json({ token, email: foundUser.email });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  authRouter.post('/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    if (!db) return res.status(500).json({ error: 'Database not initialized' });
+    
+    try {
+      const usersQuery = query(collection(db, 'users'));
+      const usersSnap = await getDocs(usersQuery);
+      let foundUser = null;
+      for (const d of usersSnap.docs) {
+        if (d.data().email === email) {
+          foundUser = d.data();
+          break;
+        }
+      }
+      
+      if (!foundUser) {
+        // Return 200 even if not found to prevent email enumeration
+        return res.json({ message: 'If an account exists, a reset link was sent.' });
+      }
+      
+      const resetToken = crypto.randomBytes(3).toString('hex').toUpperCase();
+      const resetTokenExpiry = Date.now() + 3600000; // 1 hour
+      
+      foundUser.resetToken = resetToken;
+      foundUser.resetTokenExpiry = resetTokenExpiry;
+      await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      
+      const transporter = getTransporter();
+      if (transporter) {
+        await transporter.sendMail({
+          from: process.env.SMTP_USER || 'no-reply@uptimemonitor',
+          to: email,
+          subject: 'Your password reset code',
+          text: `Your password reset code is: ${resetToken}\n\nIt expires in 1 hour.`
+        });
+      }
+      
+      res.json({ message: 'If an account exists, a reset link was sent.' });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  authRouter.post('/reset-password', async (req, res) => {
+    const { email, token, newPassword } = req.body;
+    if (!db) return res.status(500).json({ error: 'Database not initialized' });
+    
+    try {
+      const usersQuery = query(collection(db, 'users'));
+      const usersSnap = await getDocs(usersQuery);
+      let foundUser = null;
+      for (const d of usersSnap.docs) {
+        if (d.data().email === email) {
+          foundUser = d.data();
+          break;
+        }
+      }
+      
+      if (!foundUser || foundUser.resetToken !== token || !foundUser.resetTokenExpiry || foundUser.resetTokenExpiry < Date.now()) {
+        return res.status(400).json({ error: 'Invalid or expired token' });
+      }
+      
+      foundUser.passwordHash = await bcrypt.hash(newPassword, 10);
+      foundUser.resetToken = null;
+      foundUser.resetTokenExpiry = null;
+      
+      await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      res.json({ message: 'Password reset successfully' });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  authRouter.get('/verify', requireAuth, (req, res) => {
+    res.json({ valid: true, email: (req as any).user.email });
+  });
+
+  app.use('/api/auth', authRouter);
+
   // API Routes
   const apiRouter = express.Router();
+  apiRouter.use(requireAuth);
 
   apiRouter.get('/config', (req, res) => {
     res.json(appConfig);

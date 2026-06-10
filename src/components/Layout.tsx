@@ -1,14 +1,15 @@
 import { ReactNode } from 'react';
-import { Activity, Settings, List, ShieldCheck, Link2 } from 'lucide-react';
+import { Activity, Settings, List, ShieldCheck, Link2, LogOut } from 'lucide-react';
 import { clsx } from 'clsx';
 
 interface LayoutProps {
   children: ReactNode;
   activeTab: 'dashboard' | 'logs' | 'crawler' | 'settings';
   onTabChange: (tab: 'dashboard' | 'logs' | 'crawler' | 'settings') => void;
+  onLogout?: () => void;
 }
 
-export default function Layout({ children, activeTab, onTabChange }: LayoutProps) {
+export default function Layout({ children, activeTab, onTabChange, onLogout }: LayoutProps) {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
     { id: 'logs', label: 'Logs', icon: List },
@@ -45,6 +46,20 @@ export default function Layout({ children, activeTab, onTabChange }: LayoutProps
                   </button>
                 );
               })}
+              
+              {onLogout && (
+                <>
+                  <div className="w-px bg-slate-800 my-2 mx-1 rounded-full text-transparent">-</div>
+                  <button
+                    onClick={onLogout}
+                    className="flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all duration-200 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10"
+                    title="Logout"
+                  >
+                    <LogOut className="h-4 w-4" />
+                    <span className="hidden sm:inline">Logout</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>

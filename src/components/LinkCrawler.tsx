@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, Dispatch, SetStateAction } from 'react';
 import { CrawledLink } from '../types';
 import { formatDistanceToNow } from 'date-fns';
 import { ShieldCheck, ShieldAlert, Link2, Search, Filter, Ban, CheckCircle2, Clock, Globe } from 'lucide-react';
@@ -7,7 +7,7 @@ import { clsx } from 'clsx';
 
 interface LinkCrawlerProps {
   links: CrawledLink[];
-  setLinks: React.Dispatch<React.SetStateAction<CrawledLink[]>>;
+  setLinks: Dispatch<SetStateAction<CrawledLink[]>>;
 }
 
 export default function LinkCrawler({ links, setLinks }: LinkCrawlerProps) {

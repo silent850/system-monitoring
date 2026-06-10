@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, ReactNode } from 'react';
 import { ShieldAlert, ShieldCheck, Activity, Globe, RefreshCcw } from 'lucide-react';
 import { UptimeLog } from '../types';
 
@@ -92,7 +92,7 @@ export default function Dashboard({ logs }: { logs: UptimeLog[] }) {
   );
 }
 
-function StatCard({ title, value, icon }: { title: string, value: string, icon: React.ReactNode }) {
+function StatCard({ title, value, icon }: { title: string, value: string, icon: ReactNode }) {
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
       <div className="flex items-center justify-between mb-4">
