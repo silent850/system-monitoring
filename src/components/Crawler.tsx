@@ -110,7 +110,7 @@ export function Crawler() {
       </div>
 
       <div className="space-y-6">
-        {Object.entries(parentGroups).map(([parent, groupLinks]) => (
+        {(Object.entries(parentGroups) as [string, CrawledLink[]][]).map(([parent, groupLinks]) => (
           <div key={parent} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
             <div className="px-4 py-3 bg-slate-800/30 border-b border-slate-800 flex items-center gap-2">
               <Globe className="text-indigo-400 size-4" />

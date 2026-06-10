@@ -105,7 +105,11 @@ async function checkUrls(config: AppConfig) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process',
+      '--disable-extensions'
     ];
     
     if (proxyConfig) {
@@ -114,7 +118,13 @@ async function checkUrls(config: AppConfig) {
 
     let browser;
     try {
-      browser = await puppeteer.launch({ headless: true, args });
+      browser = await puppeteer.launch({
+        headless: true,
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH 
+          || '/nix/store/chromium/bin/chromium'
+          || (typeof puppeteer.executablePath === 'function' ? puppeteer.executablePath() : undefined),
+        args
+      });
       
       const page = await browser.newPage();
       if (proxyConfig && proxyConfig.username && proxyConfig.password) {

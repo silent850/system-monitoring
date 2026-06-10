@@ -1,2 +1,8 @@
 [phases.setup]
-nixPkgs = ['chromium', 'nss', 'freetype', 'harfbuzz', 'ca-certificates']
+nixPkgs = ['chromium', 'nss', 'freetype', 'harfbuzz', 'ca-certificates', 'wget']
+
+[phases.build]
+cmds = ['npm run build']
+
+[start]
+cmd = 'npm start'
