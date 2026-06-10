@@ -47,6 +47,7 @@ const MAX_LOGS = 1000;
 const MAX_CRAWLED_LINKS = 5000;
 
 let crawledLinksCache: CrawledLink[] = [];
+let usersCache: any[] = [];
 
 const trimCrawledLinksCache = async () => {
   if (crawledLinksCache.length > MAX_CRAWLED_LINKS) {
@@ -88,25 +89,41 @@ const loadStateFromDB = async () => {
       appConfig = { ...appConfig, ...configDoc.data() as AppConfig };
       console.log('Loaded config from DB');
     } else {
-      // Seeder: Save default state if it doesn't exist
       await setDoc(doc(db, 'config', 'main'), appConfig);
       console.log('Seeded initial config to DB');
     }
+  } catch (err: any) {
+    console.warn('Could not load config from DB:', err.message);
+  }
 
+  try {
     const logsQuery = query(collection(db, 'logs'), orderBy('timestamp', 'desc'), limit(MAX_LOGS));
     const logsSnap = await getDocs(logsQuery);
     uptimeLogs = logsSnap.docs.map(d => d.data() as UptimeLog);
     console.log(`Loaded ${uptimeLogs.length} logs from DB`);
+  } catch (err: any) {
+    console.warn('Could not load logs from DB:', err.message);
+  }
 
+  try {
     const linksQuery = query(collection(db, 'crawled_links'));
     const linksSnap = await getDocs(linksQuery);
     crawledLinksCache = linksSnap.docs.map(d => d.data() as CrawledLink);
     console.log(`Loaded ${crawledLinksCache.length} crawled links from DB`);
     await trimCrawledLinksCache();
+  } catch (err: any) {
+    console.warn('Could not load crawled links from DB:', err.message);
+  }
 
     // Check for users and seed admin if none
-    const usersSnap = await getDocs(query(collection(db, 'users'), limit(1)));
-    if (usersSnap.empty) {
+    try {
+      const usersSnap = await getDocs(query(collection(db, 'users')));
+      usersCache = usersSnap.docs.map(d => d.data());
+    } catch (err: any) {
+      console.warn('Could not load users from Firestore, using in-memory cache:', err.message);
+    }
+
+    if (usersCache.length === 0) {
       const adminPasswordRaw = 'admin123';
       const passwordHash = await bcrypt.hash(adminPasswordRaw, 10);
       const adminUser = {
@@ -115,13 +132,14 @@ const loadStateFromDB = async () => {
         passwordHash,
         createdAt: new Date().toISOString()
       };
-      await setDoc(doc(db, 'users', adminUser.id), adminUser);
+      usersCache.push(adminUser);
       console.log(`Seeded default admin user: admin@example.com / ${adminPasswordRaw}`);
+      try {
+        await setDoc(doc(db, 'users', adminUser.id), adminUser);
+      } catch (err: any) {
+        console.warn('Could not save admin user to Firestore:', err.message);
+      }
     }
-
-  } catch (err) {
-    console.error('Failed to sync state with DB:', err);
-  }
 };
 
 const persistConfigToDB = async () => {
@@ -489,18 +507,9 @@ async function startServer() {
   
   authRouter.post('/login', async (req, res) => {
     const { email, password } = req.body;
-    if (!db) return res.status(500).json({ error: 'Database not initialized' });
     
     try {
-      const usersQuery = query(collection(db, 'users'));
-      const usersSnap = await getDocs(usersQuery);
-      let foundUser = null;
-      for (const d of usersSnap.docs) {
-        if (d.data().email === email) {
-          foundUser = d.data();
-          break;
-        }
-      }
+      let foundUser = usersCache.find(u => u.email === email);
       
       if (!foundUser) return res.status(401).json({ error: 'Invalid credentials' });
       
@@ -509,25 +518,17 @@ async function startServer() {
       
       const token = jwt.sign({ email: foundUser.email, id: foundUser.id }, JWT_SECRET, { expiresIn: '24h' });
       res.json({ token, email: foundUser.email });
-    } catch (err) {
-      res.status(500).json({ error: 'Server error' });
+    } catch (err: any) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Server error: ' + err.message });
     }
   });
 
   authRouter.post('/forgot-password', async (req, res) => {
     const { email } = req.body;
-    if (!db) return res.status(500).json({ error: 'Database not initialized' });
     
     try {
-      const usersQuery = query(collection(db, 'users'));
-      const usersSnap = await getDocs(usersQuery);
-      let foundUser = null;
-      for (const d of usersSnap.docs) {
-        if (d.data().email === email) {
-          foundUser = d.data();
-          break;
-        }
-      }
+      let foundUser = usersCache.find(u => u.email === email);
       
       if (!foundUser) {
         // Return 200 even if not found to prevent email enumeration
@@ -539,7 +540,12 @@ async function startServer() {
       
       foundUser.resetToken = resetToken;
       foundUser.resetTokenExpiry = resetTokenExpiry;
-      await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      
+      try {
+        if (db) await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      } catch (err: any) {
+        console.warn('Could not save reset token to DB:', err.message);
+      }
       
       const transporter = getTransporter();
       if (transporter) {
@@ -559,18 +565,9 @@ async function startServer() {
 
   authRouter.post('/reset-password', async (req, res) => {
     const { email, token, newPassword } = req.body;
-    if (!db) return res.status(500).json({ error: 'Database not initialized' });
     
     try {
-      const usersQuery = query(collection(db, 'users'));
-      const usersSnap = await getDocs(usersQuery);
-      let foundUser = null;
-      for (const d of usersSnap.docs) {
-        if (d.data().email === email) {
-          foundUser = d.data();
-          break;
-        }
-      }
+      let foundUser = usersCache.find(u => u.email === email);
       
       if (!foundUser || foundUser.resetToken !== token || !foundUser.resetTokenExpiry || foundUser.resetTokenExpiry < Date.now()) {
         return res.status(400).json({ error: 'Invalid or expired token' });
@@ -580,7 +577,11 @@ async function startServer() {
       foundUser.resetToken = null;
       foundUser.resetTokenExpiry = null;
       
-      await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      try {
+        if (db) await setDoc(doc(db, 'users', foundUser.id), foundUser);
+      } catch (err: any) {
+        console.warn('Could not save new password to DB:', err.message);
+      }
       res.json({ message: 'Password reset successfully' });
     } catch (err) {
       res.status(500).json({ error: 'Server error' });
