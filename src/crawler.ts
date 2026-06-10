@@ -109,7 +109,9 @@ async function checkUrls(config: AppConfig) {
       '--no-first-run',
       '--no-zygote',
       '--single-process',
-      '--disable-extensions'
+      '--disable-extensions',
+      '--disable-software-rasterizer',
+      '--disable-features=VizDisplayCompositor'
     ];
     
     if (proxyConfig) {
@@ -120,9 +122,8 @@ async function checkUrls(config: AppConfig) {
     try {
       browser = await puppeteer.launch({
         headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH 
-          || '/usr/bin/chromium' 
-          || '/usr/bin/chromium-browser',
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
+          '/nix/var/nix/profiles/default/bin/chromium',
         args
       });
       

@@ -21,7 +21,7 @@ try {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-development';
-const PORT = parseInt(process.env.PORT || '3000');
+const PORT = parseInt(process.env.PORT || '8080');
 
 export { db };
 
