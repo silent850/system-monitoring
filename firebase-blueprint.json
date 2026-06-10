@@ -1,0 +1,46 @@
+{
+  "entities": {
+    "Config": {
+      "title": "Config",
+      "description": "App configuration",
+      "type": "object",
+      "properties": {}
+    },
+    "Log": {
+      "title": "Log",
+      "description": "Uptime log",
+      "type": "object",
+      "properties": {}
+    },
+    "CrawledLink": {
+      "title": "CrawledLink",
+      "description": "Crawled link",
+      "type": "object",
+      "properties": {}
+    },
+    "User": {
+      "title": "User",
+      "description": "User account",
+      "type": "object",
+      "properties": {}
+    }
+  },
+  "firestore": {
+    "/config/{docId}": {
+      "schema": { "$ref": "#/entities/Config" },
+      "description": "Config"
+    },
+    "/logs/{docId}": {
+      "schema": { "$ref": "#/entities/Log" },
+      "description": "Logs"
+    },
+    "/crawled_links/{docId}": {
+      "schema": { "$ref": "#/entities/CrawledLink" },
+      "description": "Crawled Links"
+    },
+    "/users/{docId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Users"
+    }
+  }
+}

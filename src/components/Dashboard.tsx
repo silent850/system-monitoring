@@ -1,105 +1,110 @@
-import { useEffect, useState, ReactNode } from 'react';
-import { ShieldAlert, ShieldCheck, Activity, Globe, RefreshCcw } from 'lucide-react';
-import { UptimeLog } from '../types';
+import React, { useEffect, useState } from 'react';
+import { api } from '../App';
+import { UptimeLog, AppConfig } from '../types';
+import { Globe, ArrowUpCircle, ArrowDownCircle, Clock, Activity } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
 
-export default function Dashboard({ logs }: { logs: UptimeLog[] }) {
-  // Extract unique URLs and their latest status
-  const urlStatusMap = new Map<string, UptimeLog>();
+export function Dashboard() {
+  const [logs, setLogs] = useState<UptimeLog[]>([]);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [status, setStatus] = useState<any>(null);
+
+  useEffect(() => {
+    const fetchData = async () => {
+      try {
+        const [logsData, configData, statusData] = await Promise.all([
+          api.get('/logs'),
+          api.get('/config'),
+          api.get('/status')
+        ]);
+        setLogs(logsData || []);
+        setConfig(configData);
+        setStatus(statusData);
+      } catch (e) {}
+    };
+    fetchData();
+    const interval = setInterval(fetchData, 10000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const monitoredUrls = config?.urls || [];
   
-  logs.forEach(log => {
-    if (!urlStatusMap.has(log.url)) {
-      urlStatusMap.set(log.url, log);
+  // Get latest log for each url
+  const latestLogs = new Map<string, UptimeLog>();
+  logs.filter(l => !l.isSubLink).forEach(log => {
+    if (!latestLogs.has(log.url)) {
+      latestLogs.set(log.url, log);
     }
   });
 
-  const uniqueUrls = Array.from(urlStatusMap.values());
-  const currentlyUp = uniqueUrls.filter(u => u.status === 'up').length;
-  const currentlyDown = uniqueUrls.filter(u => u.status === 'down').length;
-
-  // Calculate average response time
-  const avgResponseTime = logs.length > 0 
-    ? Math.round(logs.reduce((acc, log) => acc + log.responseTime, 0) / logs.length)
+  const upCount = Array.from(latestLogs.values()).filter(l => l.status === 'up').length;
+  const downCount = Array.from(latestLogs.values()).filter(l => l.status === 'down').length;
+  const avgResponse = latestLogs.size > 0 
+    ? Math.round(Array.from(latestLogs.values()).reduce((acc, l) => acc + l.responseTime, 0) / latestLogs.size) 
     : 0;
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-medium tracking-tight text-white">System Overview</h1>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <StatCard 
-          title="Monitored URLs" 
-          value={uniqueUrls.length.toString()} 
-          icon={<Globe className="h-5 w-5 text-indigo-400" />} 
-        />
-        <StatCard 
-          title="Currently Up" 
-          value={currentlyUp.toString()} 
-          icon={<ShieldCheck className="h-5 w-5 text-emerald-400" />} 
-        />
-        <StatCard 
-          title="Currently Down" 
-          value={currentlyDown.toString()} 
-          icon={<ShieldAlert className="h-5 w-5 text-rose-400" />} 
-        />
-        <StatCard 
-          title="Avg Response" 
-          value={`${avgResponseTime}ms`} 
-          icon={<Activity className="h-5 w-5 text-cyan-400" />} 
-        />
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { label: 'Total Monitored', value: monitoredUrls.length, icon: <Globe className="text-blue-400" /> },
+          { label: 'Currently Up', value: upCount, icon: <ArrowUpCircle className="text-emerald-400" /> },
+          { label: 'Currently Down', value: downCount, icon: <ArrowDownCircle className="text-rose-400" /> },
+          { label: 'Avg Response', value: `${avgResponse}ms`, icon: <Clock className="text-indigo-400" /> },
+        ].map((stat, i) => (
+          <div key={i} className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col gap-2">
+            <div className="flex items-center justify-between text-sm font-medium text-slate-400">
+              {stat.label}
+              {stat.icon}
+            </div>
+            <div className="text-3xl font-semibold text-slate-100">{stat.value}</div>
+          </div>
+        ))}
       </div>
 
       <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-800 flex justify-between items-center">
-          <h2 className="text-lg font-medium text-white">Latest Status by URL</h2>
+        <div className="p-4 border-b border-slate-800 flex justify-between items-center">
+          <h2 className="text-lg font-medium">Live Status</h2>
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            {status?.isRunning && <Activity size={14} className="animate-pulse text-indigo-400" />}
+            {status?.isRunning ? 'Checking now...' : `Next check in ${Math.max(0, Math.round((status?.nextCheckTime - Date.now())/1000))}s`}
+          </div>
         </div>
         <div className="divide-y divide-slate-800/50">
-          {uniqueUrls.length === 0 ? (
-            <div className="px-6 py-12 text-center text-slate-500">
-              No URLs currently monitored or awaiting first check.
-            </div>
-          ) : (
-            uniqueUrls.map((site) => (
-              <div key={site.url} className="px-6 py-4 flex items-center justify-between hover:bg-slate-800/20 transition-colors">
-                <div className="flex items-center gap-4">
-                  <div className={`flex items-center justify-center h-10 w-10 rounded-full ${
-                    site.status === 'up' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
-                  }`}>
-                    {site.status === 'up' ? <ShieldCheck className="h-5 w-5" /> : <ShieldAlert className="h-5 w-5" />}
+          {monitoredUrls.map((url) => {
+            const log = latestLogs.get(url);
+            const isUp = log?.status === 'up';
+            return (
+              <div key={url} className="p-4 flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between hover:bg-slate-800/20 transition-colors">
+                <div className="flex items-start gap-4">
+                  <div className={`mt-1 px-2.5 py-1 text-xs font-bold rounded flex items-center gap-1.5 ${isUp ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
+                    <div className={`w-1.5 h-1.5 rounded-full ${isUp ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                    {isUp ? 'UP' : log ? 'DOWN' : 'PENDING'}
                   </div>
                   <div>
-                    <h3 className="text-sm font-medium text-slate-200">{site.url}</h3>
-                    <p className="text-xs text-slate-500 font-mono mt-1">Checked {new Date(site.timestamp).toLocaleTimeString()}</p>
+                    <div className="font-mono text-sm break-all text-slate-200">{url}</div>
+                    <div className="text-xs text-slate-500 mt-1">{log?.pageTitle || 'Waiting for initial check...'}</div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className="flex items-center gap-2 justify-end">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-                      site.status === 'up' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                    }`}>
-                      {site.status.toUpperCase()}
-                    </span>
+                {log && (
+                  <div className="flex items-center gap-6 text-sm">
+                    <div className="flex items-center gap-2 text-slate-400">
+                      <Clock size={14} />
+                      {log.responseTime}ms
+                    </div>
+                    <div className="text-slate-500 whitespace-nowrap">
+                      {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true })}
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-500 font-mono mt-1">{site.responseTime}ms</p>
-                </div>
+                )}
               </div>
-            ))
+            );
+          })}
+          {monitoredUrls.length === 0 && (
+            <div className="p-8 text-center text-slate-500">No URLs configured. Add targets in Settings.</div>
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function StatCard({ title, value, icon }: { title: string, value: string, icon: ReactNode }) {
-  return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-6 flex flex-col justify-between">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-medium text-slate-400">{title}</h3>
-        {icon}
-      </div>
-      <p className="text-3xl font-semibold tracking-tight text-white">{value}</p>
     </div>
   );
 }

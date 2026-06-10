@@ -3,23 +3,28 @@ export interface AppConfig {
   proxies: string[];
   email: string;
   intervalSeconds: number;
-  blockedLinks: string[];
   crawlEnabled: boolean;
   crawlDepth: number;
+  blockedLinks: string[];
+  userAgent: string;
+  viewportWidth: number;
+  viewportHeight: number;
 }
-
-export type LogStatus = 'up' | 'down';
 
 export interface UptimeLog {
   id: string;
   url: string;
-  status: LogStatus;
+  status: 'up' | 'down';
   timestamp: string;
-  responseTime: number; // in milliseconds
+  responseTime: number;
   proxyUsed: string | null;
   errorDetails?: string;
   isSubLink?: boolean;
-  parentUrl?: string; // Root URL to which this sublink belongs
+  parentUrl?: string;
+  linkType?: string;
+  screenshotBase64?: string;
+  statusCode?: number;
+  pageTitle?: string;
 }
 
 export interface CrawledLink {
@@ -27,18 +32,21 @@ export interface CrawledLink {
   parentUrl: string;
   href: string;
   linkText: string;
+  linkType: 'anchor' | 'button' | 'image' | 'form' | 'onclick' | 'srcset' | 'area';
   isStatic: boolean;
   isDynamic: boolean;
+  isExternal: boolean;
   isBlocked: boolean;
   lastStatus: 'up' | 'down' | 'pending' | 'skipped';
   lastChecked?: string;
   responseTime?: number;
+  statusCode?: number;
   depth: number;
+  errorDetails?: string;
 }
 
-export interface DashboardStats {
-  totalMonitored: number;
-  currentlyUp: number;
-  currentlyDown: number;
-  totalChecks: number;
+export interface User {
+  id: string;
+  email: string;
+  passwordHash: string;
 }
