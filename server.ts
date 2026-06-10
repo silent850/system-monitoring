@@ -21,12 +21,17 @@ try {
 }
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-development';
-const PORT = 3000;
+const PORT = parseInt(process.env.PORT || '3000');
 
 export { db };
 
 const app = express();
 app.use(express.json());
+
+// Health Check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
 
 // Auth middleware
 const authenticateToken = (req: any, res: any, next: any) => {

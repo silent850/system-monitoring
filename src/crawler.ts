@@ -121,8 +121,8 @@ async function checkUrls(config: AppConfig) {
       browser = await puppeteer.launch({
         headless: true,
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH 
-          || '/nix/store/chromium/bin/chromium'
-          || (typeof puppeteer.executablePath === 'function' ? puppeteer.executablePath() : undefined),
+          || '/usr/bin/chromium' 
+          || '/usr/bin/chromium-browser',
         args
       });
       

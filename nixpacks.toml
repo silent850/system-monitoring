@@ -5,4 +5,4 @@ nixPkgs = ['chromium', 'nss', 'freetype', 'harfbuzz', 'ca-certificates', 'wget']
 cmds = ['npm run build']
 
 [start]
-cmd = 'npm start'
+cmd = 'node dist/server.cjs'
