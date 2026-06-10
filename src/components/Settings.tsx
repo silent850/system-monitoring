@@ -9,6 +9,9 @@ export default function Settings() {
     proxies: [],
     email: '',
     intervalSeconds: 60,
+    blockedLinks: [],
+    crawlEnabled: false,
+    crawlDepth: 1,
   });
   
   const [loading, setLoading] = useState(true);
@@ -18,6 +21,7 @@ export default function Settings() {
   // Form input states
   const [urlsInput, setUrlsInput] = useState('');
   const [proxiesInput, setProxiesInput] = useState('');
+  const [blockedLinksInput, setBlockedLinksInput] = useState('');
 
   useEffect(() => {
     fetchConfig();
@@ -29,6 +33,7 @@ export default function Settings() {
       setConfig(res.data);
       setUrlsInput(res.data.urls.join('\n'));
       setProxiesInput(res.data.proxies.join('\n'));
+      setBlockedLinksInput(res.data.blockedLinks?.join('\n') || '');
     } catch (err) {
       console.error('Failed to load config', err);
     } finally {
@@ -44,11 +49,13 @@ export default function Settings() {
     // Parse textareas back into arrays
     const parsedUrls = urlsInput.split('\n').map(s => s.trim()).filter(Boolean);
     const parsedProxies = proxiesInput.split('\n').map(s => s.trim()).filter(Boolean);
+    const parsedBlockedLinks = blockedLinksInput.split('\n').map(s => s.trim()).filter(Boolean);
     
     const newConfig: AppConfig = {
       ...config,
       urls: parsedUrls,
       proxies: parsedProxies,
+      blockedLinks: parsedBlockedLinks,
     };
 
     try {
@@ -141,6 +148,64 @@ export default function Settings() {
                 <p>To avoid regional blocks, the monitor will randomly rotate through these proxies on every check. If left empty, direct connections are used.</p>
               </div>
             </div>
+
+            <div className="pt-6 border-t border-slate-800">
+              <h2 className="text-lg font-medium text-white mb-4">Link Crawler Settings</h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                <div className="flex items-center justify-between bg-slate-950 border border-slate-700 rounded-lg p-4">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300">
+                      Enable Link Crawling
+                    </label>
+                    <p className="text-xs text-slate-500 mt-1">Automatically discover and check links found on target pages.</p>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input 
+                      type="checkbox" 
+                      className="sr-only peer" 
+                      checked={config.crawlEnabled}
+                      onChange={(e) => setConfig({...config, crawlEnabled: e.target.checked})}
+                    />
+                    <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-500"></div>
+                  </label>
+                </div>
+                
+                <div className="bg-slate-950 border border-slate-700 rounded-lg p-4">
+                  <label className="block text-sm font-medium text-slate-300 mb-1">
+                    Crawl Depth
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    max="3"
+                    value={config.crawlDepth}
+                    onChange={(e) => setConfig({ ...config, crawlDepth: parseInt(e.target.value) || 1 })}
+                    disabled={!config.crawlEnabled}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md p-2 text-slate-200 focus:ring-2 focus:ring-indigo-500 outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                  />
+                  <p className="text-xs text-slate-500 mt-2">Depth 1 = only links on homepage, Depth 2 = also follow those links.</p>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-slate-300 mb-1">
+                  Blocked Links (Never Visit These)
+                </label>
+                <textarea
+                  value={blockedLinksInput}
+                  onChange={(e) => setBlockedLinksInput(e.target.value)}
+                  disabled={!config.crawlEnabled}
+                  className="w-full h-32 bg-slate-950 border border-slate-700 rounded-lg p-3 text-slate-200 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none font-mono text-sm leading-relaxed disabled:opacity-50 disabled:cursor-not-allowed"
+                  placeholder="https://mysite.com/logout&#10;https://mysite.com/delete&#10;/admin&#10;/wp-admin"
+                />
+                <div className="mt-2 flex items-start gap-2 text-xs text-rose-400">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <p>Always block destructive URLs like /logout, /delete, /admin to prevent the crawler from triggering them.</p>
+                </div>
+              </div>
+            </div>
+
           </div>
 
           <div className="pt-4 border-t border-slate-800 flex items-center justify-between">

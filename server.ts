@@ -4,7 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import axios from 'axios';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import nodemailer from 'nodemailer';
-import { AppConfig, UptimeLog } from './src/types';
+import { AppConfig, UptimeLog, CrawledLink } from './src/types';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -33,10 +33,16 @@ let appConfig: AppConfig = {
   proxies: [],
   email: '',
   intervalSeconds: 60,
+  blockedLinks: [],
+  crawlEnabled: false,
+  crawlDepth: 1,
 };
 
 let uptimeLogs: UptimeLog[] = [];
 const MAX_LOGS = 1000;
+
+let crawledLinksCache: CrawledLink[] = [];
+
 
 // Database Persistence Helpers
 const loadStateFromDB = async () => {
@@ -56,6 +62,11 @@ const loadStateFromDB = async () => {
     const logsSnap = await getDocs(logsQuery);
     uptimeLogs = logsSnap.docs.map(d => d.data() as UptimeLog);
     console.log(`Loaded ${uptimeLogs.length} logs from DB`);
+
+    const linksQuery = query(collection(db, 'crawled_links'));
+    const linksSnap = await getDocs(linksQuery);
+    crawledLinksCache = linksSnap.docs.map(d => d.data() as CrawledLink);
+    console.log(`Loaded ${crawledLinksCache.length} crawled links from DB`);
   } catch (err) {
     console.error('Failed to sync state with DB:', err);
   }
@@ -69,6 +80,16 @@ const persistConfigToDB = async () => {
     console.error('Failed to save config to DB:', err);
   }
 };
+
+const persistCrawledLinkToDB = async (link: CrawledLink) => {
+  if (!db) return;
+  try {
+    await setDoc(doc(db, 'crawled_links', link.id), link);
+  } catch (err) {
+    console.error('Failed to save crawled link to DB:', err);
+  }
+};
+
 
 const persistLogToDB = async (log: UptimeLog) => {
   if (!db) return;
@@ -133,6 +154,148 @@ const sendEmailAlert = async (url: string, errorMsg: string) => {
 // Monitoring Loop Logic
 let monitorIntervalId: NodeJS.Timeout | null = null;
 
+// Link Crawler Logic
+const extractText = (str: string) => str.replace(/<[^>]+>/g, '').trim().substring(0, 100);
+
+const discoverLinks = async (targetUrl: string, parentUrl: string, html: string, depth: number) => {
+  const aTagRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  
+  const forbiddenPatterns = ['javascript:', 'mailto:', 'tel:', '#', 'data:', 'blob:'];
+
+  while ((match = aTagRegex.exec(html)) !== null) {
+    const rawHref = match[1];
+    let linkText = extractText(match[2]);
+    if (!linkText) linkText = 'Link';
+
+    // Check forbidden
+    if (forbiddenPatterns.some(p => rawHref.startsWith(p))) continue;
+
+    try {
+      const resolvedUrl = new URL(rawHref, targetUrl); // resolve relative to root target
+      const fullHref = resolvedUrl.href;
+
+      // Ensure same domain
+      const targetDomain = new URL(targetUrl).hostname;
+      if (resolvedUrl.hostname !== targetDomain) continue;
+
+      const isDynamic = fullHref.includes('?') || fullHref.includes('#');
+
+      const id = crypto.createHash('sha256').update(parentUrl + fullHref).digest('hex');
+
+      // Check if exists
+      const existing = crawledLinksCache.find(l => l.id === id);
+      const isBlocked = appConfig.blockedLinks.some(blk => fullHref.includes(blk));
+
+      if (existing) {
+         if (existing.isBlocked !== isBlocked) {
+            existing.isBlocked = isBlocked;
+            await persistCrawledLinkToDB(existing);
+         }
+         continue;
+      }
+
+      const newLink: CrawledLink = { 
+        id,
+        parentUrl,
+        href: fullHref,
+        linkText,
+        isStatic: !isDynamic,
+        isDynamic,
+        isBlocked,
+        lastStatus: 'pending',
+        depth
+      };
+
+      crawledLinksCache.push(newLink);
+      await persistCrawledLinkToDB(newLink);
+    } catch (e) {
+      // Invalid URL syntax
+    }
+  }
+};
+
+const processSubLinks = async (targetUrl: string, proxyAgent: any) => {
+  // Find up to 10 links for this targetUrl that are pending or oldest checked, and NOT blocked
+  const eligibleLinks = crawledLinksCache
+    .filter(l => l.parentUrl === targetUrl && !l.isBlocked)
+    .sort((a, b) => {
+      if (a.lastStatus === 'pending' && b.lastStatus !== 'pending') return -1;
+      if (a.lastStatus !== 'pending' && b.lastStatus === 'pending') return 1;
+      if (!a.lastChecked) return -1;
+      if (!b.lastChecked) return 1;
+      return new Date(a.lastChecked).getTime() - new Date(b.lastChecked).getTime();
+    })
+    .slice(0, 10);
+
+  for (const link of eligibleLinks) {
+    const start = Date.now();
+    try {
+      const res = await axios.get(link.href, {
+        httpsAgent: proxyAgent,
+        httpAgent: proxyAgent,
+        timeout: 10000,
+        validateStatus: (status) => status >= 200 && status < 400
+      });
+      const responseTime = Date.now() - start;
+
+      link.lastStatus = 'up';
+      link.lastChecked = new Date().toISOString();
+      link.responseTime = responseTime;
+
+      const newLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url: link.href,
+        status: 'up',
+        timestamp: link.lastChecked,
+        responseTime,
+        proxyUsed: proxyAgent ? (proxyAgent as any).proxy?.href || 'Proxy' : null,
+        isSubLink: true,
+        parentUrl: targetUrl
+      };
+      
+      uptimeLogs.unshift(newLog);
+      await persistLogToDB(newLog);
+
+      if (appConfig.crawlDepth >= 2 && link.depth < appConfig.crawlDepth) {
+         if (typeof res.data === 'string') {
+             await discoverLinks(targetUrl, targetUrl, res.data, link.depth + 1); 
+         }
+      }
+
+    } catch (error: any) {
+      const responseTime = Date.now() - start;
+      const errorMsg = error.message || 'Unknown error';
+      
+      link.lastStatus = 'down';
+      link.lastChecked = new Date().toISOString();
+      link.responseTime = responseTime;
+
+      const newErrLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url: link.href,
+        status: 'down',
+        timestamp: link.lastChecked,
+        responseTime,
+        proxyUsed: proxyAgent ? (proxyAgent as any).proxy?.href || 'Proxy' : null,
+        errorDetails: errorMsg,
+        isSubLink: true,
+        parentUrl: targetUrl
+      };
+
+      uptimeLogs.unshift(newErrLog);
+      await persistLogToDB(newErrLog);
+      // specific requirement: Send email alert if a sub-link is down, include the crashed link URL in subject
+      await sendEmailAlert(`Sub-link: ${link.href}`, `A sub-link crashed on your site:\nURL: ${link.href}\nFound on: ${targetUrl}\nError: ${errorMsg}`);
+    }
+
+    await persistCrawledLinkToDB(link);
+    if (uptimeLogs.length > MAX_LOGS) {
+      uptimeLogs = uptimeLogs.slice(0, MAX_LOGS);
+    }
+  }
+};
+
 const checkUrls = async () => {
   if (appConfig.urls.length === 0) return;
 
@@ -155,14 +318,16 @@ const checkUrls = async () => {
     }
 
     const start = Date.now();
+    let htmlContent: string | null = null;
     try {
-      await axios.get(url, {
+      const res = await axios.get(url, {
         httpsAgent: proxyAgent,
         httpAgent: proxyAgent, // Handle proxy for http too if needed
         timeout: 10000,
         validateStatus: (status) => status >= 200 && status < 400
       });
       const responseTime = Date.now() - start;
+      if (typeof res.data === 'string') htmlContent = res.data;
 
       const newLog: UptimeLog = {
         id: crypto.randomUUID(),
@@ -195,6 +360,13 @@ const checkUrls = async () => {
 
       // Send alert
       await sendEmailAlert(url, errorMsg);
+    }
+
+    if (appConfig.crawlEnabled) {
+      if (htmlContent) {
+        await discoverLinks(url, url, htmlContent, 1);
+      }
+      await processSubLinks(url, proxyAgent);
     }
 
     // Keep logs bound
@@ -260,6 +432,61 @@ async function startServer() {
     uptimeLogs = [];
     await clearLogsInDB();
     res.json({ message: 'Logs cleared' });
+  });
+
+  // Link Crawler APIs
+  apiRouter.get('/crawled-links', (req, res) => {
+    res.json(crawledLinksCache);
+  });
+
+  apiRouter.post('/crawled-links/block', async (req, res) => {
+    const { href } = req.body;
+    if (!href) return res.status(400).json({ error: 'href required' });
+
+    if (!appConfig.blockedLinks.includes(href)) {
+      appConfig.blockedLinks.push(href);
+      await persistConfigToDB();
+    }
+
+    const linksToBlock = crawledLinksCache.filter(l => l.href.includes(href));
+    for (const link of linksToBlock) {
+      if (!link.isBlocked) {
+        link.isBlocked = true;
+        await persistCrawledLinkToDB(link);
+      }
+    }
+
+    res.json({ message: 'Link blocked', blockedLinks: appConfig.blockedLinks });
+  });
+
+  apiRouter.post('/crawled-links/unblock', async (req, res) => {
+    const { href } = req.body;
+    if (!href) return res.status(400).json({ error: 'href required' });
+
+    appConfig.blockedLinks = appConfig.blockedLinks.filter(b => b !== href);
+    await persistConfigToDB();
+
+    const linksToUnblock = crawledLinksCache.filter(l => l.href.includes(href));
+    for (const link of linksToUnblock) {
+      const isStillBlocked = appConfig.blockedLinks.some(blk => link.href.includes(blk));
+      if (link.isBlocked && !isStillBlocked) {
+        link.isBlocked = false;
+        await persistCrawledLinkToDB(link);
+      }
+    }
+
+    res.json({ message: 'Link unblocked', blockedLinks: appConfig.blockedLinks });
+  });
+
+  apiRouter.delete('/crawled-links/clear', async (req, res) => {
+    if (db) {
+      const batch = writeBatch(db);
+      const snap = await getDocs(query(collection(db, 'crawled_links')));
+      snap.docs.forEach(d => batch.delete(d.ref));
+      await batch.commit();
+    }
+    crawledLinksCache = [];
+    res.json({ message: 'Crawled links cleared' });
   });
 
   app.use('/api', apiRouter);

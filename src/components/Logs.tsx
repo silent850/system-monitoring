@@ -1,5 +1,5 @@
 import { formatDistanceToNow } from 'date-fns';
-import { ShieldCheck, ShieldAlert, Wifi, Globe } from 'lucide-react';
+import { ShieldCheck, ShieldAlert, Wifi, Globe, Waypoints } from 'lucide-react';
 import { UptimeLog } from '../types';
 
 export default function Logs({ logs }: { logs: UptimeLog[] }) {
@@ -42,10 +42,20 @@ export default function Logs({ logs }: { logs: UptimeLog[] }) {
                               <ShieldAlert className="w-3.5 h-3.5" /> DOWN
                             </span>
                          )}
+                         {log.isSubLink && (
+                           <span className="flex items-center gap-1 text-indigo-400 bg-indigo-500/10 px-1.5 py-1 rounded text-[10px] font-semibold border border-indigo-500/20 uppercase tracking-wide">
+                             <Waypoints className="w-3 h-3" /> SUBLINK
+                           </span>
+                         )}
                       </div>
                     </td>
                     <td className="px-6 py-4">
                       <span className="text-slate-200 font-medium">{log.url}</span>
+                      {log.isSubLink && log.parentUrl && (
+                        <p className="text-xs text-slate-500 mt-1">
+                          Found on: {log.parentUrl}
+                        </p>
+                      )}
                       {log.errorDetails && (
                         <p className="text-xs text-rose-400 mt-1 line-clamp-1" title={log.errorDetails}>
                           {log.errorDetails}

@@ -1,17 +1,18 @@
 import { ReactNode } from 'react';
-import { Activity, Settings, List, ShieldCheck } from 'lucide-react';
+import { Activity, Settings, List, ShieldCheck, Link2 } from 'lucide-react';
 import { clsx } from 'clsx';
 
 interface LayoutProps {
   children: ReactNode;
-  activeTab: 'dashboard' | 'logs' | 'settings';
-  onTabChange: (tab: 'dashboard' | 'logs' | 'settings') => void;
+  activeTab: 'dashboard' | 'logs' | 'crawler' | 'settings';
+  onTabChange: (tab: 'dashboard' | 'logs' | 'crawler' | 'settings') => void;
 }
 
 export default function Layout({ children, activeTab, onTabChange }: LayoutProps) {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: Activity },
     { id: 'logs', label: 'Logs', icon: List },
+    { id: 'crawler', label: 'Link Crawler', icon: Link2 },
     { id: 'settings', label: 'Settings', icon: Settings },
   ] as const;
 
