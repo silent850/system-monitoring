@@ -8,6 +8,7 @@ export function Dashboard() {
   const [logs, setLogs] = useState<UptimeLog[]>([]);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [status, setStatus] = useState<any>(null);
+  const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
     const fetchData = async () => {
@@ -25,6 +26,13 @@ export function Dashboard() {
     fetchData();
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const ticker = setInterval(() => {
+      setNow(Date.now());
+    }, 1000);
+    return () => clearInterval(ticker);
   }, []);
 
   const monitoredUrls = config?.urls || [];
@@ -67,7 +75,7 @@ export function Dashboard() {
           <h2 className="text-lg font-medium">Live Status</h2>
           <div className="flex items-center gap-2 text-sm text-slate-400">
             {status?.isRunning && <Activity size={14} className="animate-pulse text-indigo-400" />}
-            {status?.isRunning ? 'Checking now...' : status?.nextCheckTime ? `Next check in ${Math.max(0, Math.round((status.nextCheckTime - Date.now())/1000))}s` : 'Waiting for connection...'}
+            {status?.isRunning ? 'Checking now...' : status?.nextCheckTime ? `Next check in ${Math.max(0, Math.round((status.nextCheckTime - now)/1000))}s` : 'Waiting for connection...'}
           </div>
         </div>
         <div className="divide-y divide-slate-800/50">

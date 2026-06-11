@@ -5,8 +5,64 @@ import { doc, getDoc, setDoc, collection, getDocs, writeBatch } from 'firebase/f
 import { AppConfig, UptimeLog, CrawledLink } from './types';
 import { sendAlert } from './mailer';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
+import fs from 'fs';
+import path from 'path';
 
 puppeteer.use(StealthPlugin());
+
+function getChromiumPath(): string | undefined {
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
+  // 1. Search dynamically inside standard Puppeteer caches
+  try {
+    const cacheDir = '/root/.cache/puppeteer/chrome';
+    if (fs.existsSync(cacheDir)) {
+      const versions = fs.readdirSync(cacheDir);
+      for (const ver of versions) {
+        const fullPath = path.join(cacheDir, ver, 'chrome-linux64', 'chrome');
+        if (fs.existsSync(fullPath)) {
+          console.log(`Matched dynamic Chrome for Testing path at: ${fullPath}`);
+          return fullPath;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Error searching dynamically in cache directory:", e);
+  }
+
+  // 2. Fallbacks to standard paths
+  const systemPaths = [
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+    '/usr/bin/google-chrome-stable'
+  ];
+  for (const sPath of systemPaths) {
+    try {
+      if (fs.existsSync(sPath)) {
+        console.log(`Found system browser at: ${sPath}`);
+        return sPath;
+      }
+    } catch (e) {}
+  }
+
+  // 3. Fallback to child process detection
+  try {
+    const detected = execSync('which chromium || which chromium-browser || which google-chrome-stable || which google-chrome', { encoding: 'utf8', stdio: [] }).trim();
+    if (detected) {
+      console.log(`Detected Chromium/Chrome via command search: ${detected}`);
+      return detected;
+    }
+  } catch (e) {
+    // Suppress verbose error, since we have local scan
+  }
+
+  console.log("No explicit browser path verified found. Defaulting to Puppeteer auto-resolution (undefined).");
+  return undefined;
+}
 
 let isRunning = false;
 let nextCheckTime = 0;
@@ -89,6 +145,168 @@ function maskProxy(proxyStr: string) {
   }
 }
 
+async function simulateClicksAndEngagement(page: any, targetUrl: string, config: AppConfig) {
+  try {
+    console.log(`Simulating browser clicks & realistic engagements on ${targetUrl}...`);
+    
+    // Extract unique sublinks and buttons for separate background tab visits
+    const sublinks = await page.evaluate(() => {
+      const urls: string[] = [];
+      const elements = Array.from(document.querySelectorAll('a, button, img'));
+      for (const el of elements) {
+        let href = '';
+        if (el.tagName === 'A') {
+          href = (el as HTMLAnchorElement).href;
+        } else if (el.tagName === 'BUTTON') {
+          href = el.getAttribute('data-href') || el.getAttribute('data-url') || '';
+        } else if (el.tagName === 'IMG') {
+          const parentA = el.closest('a');
+          if (parentA) href = parentA.href;
+        }
+        
+        if (href && href.startsWith('http') && !href.includes('#') && !urls.includes(href)) {
+          urls.push(href);
+          if (urls.length >= 8) break;
+        }
+      }
+      return urls;
+    });
+
+    console.log(`Found ${sublinks.length} primary sub-page links for deep visitor stats loading.`);
+
+    // Part A: Native on-page button, image, and link click actions with dynamic auto-close and back-routing
+    const browserRef = page.browser();
+    
+    // Auto-close handler for newly created tabs/popups triggered by clicks
+    const closeNewTabs = async (target: any) => {
+      try {
+        if (target.type() === 'page') {
+          const newPage = await target.page();
+          if (newPage) {
+            console.log(`[Popup Tracker] Click opened new tab/popup to: ${newPage.url()}. Waiting 8 seconds to register full visitor stats...`);
+            await new Promise(r => setTimeout(r, 8000));
+            await newPage.close();
+            console.log(`[Popup Tracker] Successfully closed tab.`);
+          }
+        }
+      } catch (e: any) {
+        console.error("Error handling dynamic popup auto-close:", e.message);
+      }
+    };
+    browserRef.on('targetcreated', closeNewTabs);
+
+    try {
+      // Find visible clickable elements on the page (buttons, links, images, onclicks)
+      const clickables = await page.evaluate(() => {
+        const items: { tag: string; text: string; index: number }[] = [];
+        const els = Array.from(document.querySelectorAll('button, a, img, [role="button"], [onclick]'));
+        let count = 0;
+        for (let i = 0; i < els.length; i++) {
+          const el = els[i] as HTMLElement;
+          const rect = el.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            el.setAttribute('data-sentinel-click-index', String(count));
+            items.push({
+              tag: el.tagName,
+              text: (el.innerText || el.getAttribute('alt') || el.getAttribute('src') || '').substring(0, 30).trim(),
+              index: count
+            });
+            count++;
+            if (items.length >= 10) break; // Limit interactions per cycle for stability
+          }
+        }
+        return items;
+      });
+
+      console.log(`Discovered ${clickables.length} clickable elements on the main page. Injecting real clicks...`);
+      for (const item of clickables) {
+        try {
+          const selector = `[data-sentinel-click-index="${item.index}"]`;
+          const handle = await page.$(selector);
+          if (handle) {
+            console.log(`[Native Click] Clicking <${item.tag}> "${item.text}"`);
+            
+            // Smooth scroll to simulate real user behavior 
+            await page.evaluate((sel: string) => {
+              const el = document.querySelector(sel);
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, selector);
+            await new Promise(r => setTimeout(r, 1500)); 
+
+            // Click the element!
+            await handle.click();
+            
+            // Wait for dynamic loads / transitions
+            await new Promise(r => setTimeout(r, 4000));
+
+            // Check if click navigated the main page itself
+            const currentUrl = page.url();
+            if (currentUrl !== targetUrl && !currentUrl.startsWith('about:')) {
+              console.log(`[Navigation Tracker] Click caused same-tab redirection to: ${currentUrl}. Waiting 8 seconds for visitor tracker/AdSense, then returning back...`);
+              await new Promise(r => setTimeout(r, 8000));
+              await page.goBack({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {});
+              console.log(`[Navigation Tracker] Re-anchored to main url: ${page.url()}`);
+            }
+          }
+        } catch (clickErr: any) {
+          console.error(`Error during native click on <${item.tag}>:`, clickErr.message);
+        }
+      }
+    } catch (e: any) {
+      console.error("Failed to query clickable elements on page:", e.message);
+    } finally {
+      // Clean up target listener
+      browserRef.off('targetcreated', closeNewTabs);
+    }
+
+    // Part B: Deep visiting of sub-links in dedicated tabs
+    for (const url of sublinks) {
+      let isBlocked = false;
+      if (config.blockedLinks) {
+        for (const bp of config.blockedLinks) {
+          if (bp && url.includes(bp)) isBlocked = true;
+        }
+      }
+      if (isBlocked) {
+        console.log(`Skipping blocked URL: ${url}`);
+        continue;
+      }
+
+      console.log(`Mimicking human view & click to load sublink: ${url}`);
+      let linkPage;
+      try {
+        linkPage = await page.browser().newPage();
+        if (config.userAgent) {
+          await linkPage.setUserAgent(config.userAgent);
+        }
+        await linkPage.setViewport({ width: config.viewportWidth || 1366, height: config.viewportHeight || 768 });
+        
+        await linkPage.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
+        
+        // Scroll slightly
+        await linkPage.evaluate(async () => {
+          window.scrollBy(0, 400);
+          await new Promise(r => setTimeout(r, 1500));
+          window.scrollBy(0, 400);
+        });
+
+        console.log(`Keeping sublink page open to register stats for 8 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 8000));
+        
+        await linkPage.close();
+        console.log(`Closed page for ${url}`);
+      } catch (err: any) {
+        console.error(`Error processing click visit for ${url}:`, err.message);
+        if (linkPage) {
+          try { await linkPage.close(); } catch (e) {}
+        }
+      }
+    }
+  } catch (err: any) {
+    console.error(`Error during physical click simulation on ${targetUrl}:`, err);
+  }
+}
+
 async function checkUrls(config: AppConfig) {
   for (const targetUrl of config.urls) {
     console.log(`Checking primary URL: ${targetUrl}`);
@@ -120,10 +338,11 @@ async function checkUrls(config: AppConfig) {
 
     let browser;
     try {
+      const chromiumPath = getChromiumPath();
+      console.log(`Launching Puppeteer with Chromium from: ${chromiumPath}`);
       browser = await puppeteer.launch({
         headless: true,
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || 
-          '/nix/var/nix/profiles/default/bin/chromium',
+        executablePath: chromiumPath,
         args
       });
       
@@ -168,9 +387,27 @@ async function checkUrls(config: AppConfig) {
         } catch(e) {}
         
         await sendAlert(targetUrl, errorDetails, maskProxy(proxyStr || ''), pageTitle);
-      } else if (config.crawlEnabled) {
-        // Extract links
-        discoveredLinks = await extractLinksFromPage(page, targetUrl, config.blockedLinks);
+      } else {
+        // Main page successfully loaded
+        try {
+          await page.evaluate(async () => {
+            window.scrollBy(0, 400);
+            await new Promise(r => setTimeout(r, 1000));
+            window.scrollBy(0, 400);
+          });
+        } catch (e) {}
+
+        // Wait 10s to ensure visitor trackers fully trigger and register in site stats
+        console.log(`Page parsed successfully. Waiting 10 seconds for visitor tracking/AdSense/Google Analytics...`);
+        await new Promise(resolve => setTimeout(resolve, 10000));
+
+        if (config.crawlEnabled) {
+          // Extract links
+          discoveredLinks = await extractLinksFromPage(page, targetUrl, config.blockedLinks);
+          
+          // Physically click buttons/links/images, wait for load, and close
+          await simulateClicksAndEngagement(page, targetUrl, config);
+        }
       }
 
       const responseTime = Date.now() - startTime;
@@ -397,6 +634,12 @@ async function checkSubLinks(browser: any, links: CrawledLink[], proxyConfig: an
           await batch.commit();
         }
       } catch(e) {}
+
+      // Wait for 7 seconds to register sublink visitor stats if UP
+      if (status === 'up') {
+        console.log(`Sub-link ${link.href} loaded successfully. Waiting 7s to register stats...`);
+        await new Promise(r => setTimeout(r, 7000));
+      }
 
       try { await page.close(); } catch(e){}
     });
