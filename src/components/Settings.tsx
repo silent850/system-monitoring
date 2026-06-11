@@ -14,9 +14,9 @@ export function Settings() {
     api.get('/config').then(data => {
       if (data) {
         setConfig(data);
-        setUrlsStr(data.urls?.join('\\n') || '');
-        setProxiesStr(data.proxies?.join('\\n') || '');
-        setBlockedStr(data.blockedLinks?.join('\\n') || '');
+        setUrlsStr(data.urls?.join('\n') || '');
+        setProxiesStr(data.proxies?.join('\n') || '');
+        setBlockedStr(data.blockedLinks?.join('\n') || '');
       }
     });
   }, []);
@@ -27,9 +27,9 @@ export function Settings() {
     try {
       const newConfig: AppConfig = {
         ...config,
-        urls: urlsStr.split('\\n').map(s => s.trim()).filter(Boolean),
-        proxies: proxiesStr.split('\\n').map(s => s.trim()).filter(Boolean),
-        blockedLinks: blockedStr.split('\\n').map(s => s.trim()).filter(Boolean),
+        urls: urlsStr.split('\n').map(s => s.trim()).filter(Boolean),
+        proxies: proxiesStr.split('\n').map(s => s.trim()).filter(Boolean),
+        blockedLinks: blockedStr.split('\n').map(s => s.trim()).filter(Boolean),
       };
       await api.post('/config', newConfig);
       setConfig(newConfig);

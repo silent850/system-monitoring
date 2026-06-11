@@ -67,7 +67,7 @@ export function Dashboard() {
           <h2 className="text-lg font-medium">Live Status</h2>
           <div className="flex items-center gap-2 text-sm text-slate-400">
             {status?.isRunning && <Activity size={14} className="animate-pulse text-indigo-400" />}
-            {status?.isRunning ? 'Checking now...' : `Next check in ${Math.max(0, Math.round((status?.nextCheckTime - Date.now())/1000))}s`}
+            {status?.isRunning ? 'Checking now...' : status?.nextCheckTime ? `Next check in ${Math.max(0, Math.round((status.nextCheckTime - Date.now())/1000))}s` : 'Waiting for connection...'}
           </div>
         </div>
         <div className="divide-y divide-slate-800/50">

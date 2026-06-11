@@ -1,6 +1,6 @@
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-import { db } from '../server';
+import { db } from './firebase';
 import { doc, getDoc, setDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
 import { AppConfig, UptimeLog, CrawledLink } from './types';
 import { sendAlert } from './mailer';

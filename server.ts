@@ -3,22 +3,12 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
-import { initializeApp } from 'firebase/app';
-import { getFirestore, doc, setDoc, getDoc, collection, getDocs, query, limit, orderBy, deleteDoc, writeBatch } from 'firebase/firestore';
+import { doc, setDoc, getDoc, collection, getDocs, query, limit, orderBy, deleteDoc, writeBatch } from 'firebase/firestore';
 import fs from 'fs';
+import { db } from './src/firebase';
 import { AppConfig, User, UptimeLog, CrawledLink } from './src/types';
 import { startMonitoringLoop, getMonitorStatus } from './src/crawler';
 import 'dotenv/config';
-
-// Firebase init
-let db: any;
-try {
-  const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf-8'));
-  const app = initializeApp(firebaseConfig);
-  db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-} catch (e) {
-  console.error("Firebase config not found. Disabling persistence.", e);
-}
 
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback-secret-development';
 const PORT = parseInt(process.env.PORT || '8080');
@@ -162,7 +152,7 @@ app.post('/api/auth/reset-password', async (req, res) => {
 app.get('/api/config', authenticateToken, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'DB not initialized' });
   const snap = await getDoc(doc(db, 'config', 'main'));
-  res.json(snap.data());
+  res.json(snap.data() || {});
 });
 
 app.post('/api/config', authenticateToken, async (req, res) => {
@@ -174,9 +164,15 @@ app.post('/api/config', authenticateToken, async (req, res) => {
 
 app.get('/api/logs', authenticateToken, async (req, res) => {
   if (!db) return res.status(500).json({ error: 'DB not initialized' });
-  const snap = await getDocs(query(collection(db, 'logs'), orderBy('timestamp', 'desc'), limit(500)));
-  const logs = snap.docs.map(d => d.data());
-  res.json(logs);
+  try {
+    const snap = await getDocs(collection(db, 'logs'));
+    const logs = snap.docs.map(d => d.data() as UptimeLog);
+    // Sort logically in memory by timestamp descending
+    logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    res.json(logs.slice(0, 500));
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/logs/clear', authenticateToken, async (req, res) => {
