@@ -122,8 +122,9 @@ export async function startMonitoringLoop() {
 function parseProxy(proxyStr: string) {
   try {
     const url = new URL(proxyStr.startsWith('http') ? proxyStr : `http://${proxyStr}`);
+    const port = url.port || '80';
     return {
-      server: `${url.protocol}//${url.hostname}:${url.port}`,
+      server: `http://${url.hostname}:${port}`,
       username: url.username ? decodeURIComponent(url.username) : undefined,
       password: url.password ? decodeURIComponent(url.password) : undefined
     };
@@ -136,16 +137,17 @@ function maskProxy(proxyStr: string) {
   try {
     if (!proxyStr) return 'Direct';
     const url = new URL(proxyStr.startsWith('http') ? proxyStr : `http://${proxyStr}`);
+    const port = url.port || '80';
     if (url.username && url.password) {
-      return `${url.protocol}//${url.username}:****@${url.hostname}:${url.port}`;
+      return `${url.protocol}//${url.username}:****@${url.hostname}:${port}`;
     }
-    return proxyStr;
+    return `${url.protocol}//${url.hostname}:${port}`;
   } catch {
     return proxyStr;
   }
 }
 
-async function simulateClicksAndEngagement(page: any, targetUrl: string, config: AppConfig) {
+async function simulateClicksAndEngagement(page: any, targetUrl: string, config: AppConfig, proxyConfig: any) {
   try {
     console.log(`Simulating browser clicks & realistic engagements on ${targetUrl}...`);
     
@@ -183,6 +185,18 @@ async function simulateClicksAndEngagement(page: any, targetUrl: string, config:
         if (target.type() === 'page') {
           const newPage = await target.page();
           if (newPage) {
+            if (proxyConfig && proxyConfig.username && proxyConfig.password) {
+              await newPage.authenticate({ username: proxyConfig.username, password: proxyConfig.password });
+            }
+            if (config.userAgent) {
+              await newPage.setUserAgent(config.userAgent);
+            }
+            // Inject dynamic webdriver bypass for newly initialized tabs
+            await newPage.evaluateOnNewDocument(() => {
+              Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+              (window as any).chrome = { app: { isInstalled: false }, runtime: {} };
+              Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            });
             console.log(`[Popup Tracker] Click opened new tab/popup to: ${newPage.url()}. Waiting 8 seconds to register full visitor stats...`);
             await new Promise(r => setTimeout(r, 8000));
             await newPage.close();
@@ -276,11 +290,22 @@ async function simulateClicksAndEngagement(page: any, targetUrl: string, config:
       let linkPage;
       try {
         linkPage = await page.browser().newPage();
+        if (proxyConfig && proxyConfig.username && proxyConfig.password) {
+          await linkPage.authenticate({ username: proxyConfig.username, password: proxyConfig.password });
+        }
         if (config.userAgent) {
           await linkPage.setUserAgent(config.userAgent);
         }
         await linkPage.setViewport({ width: config.viewportWidth || 1366, height: config.viewportHeight || 768 });
         
+        // Inject dynamic webdriver bypass for sublink pages
+        await linkPage.evaluateOnNewDocument(() => {
+          Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+          (window as any).chrome = { app: { isInstalled: false }, runtime: {} };
+          Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+          Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        });
+
         await linkPage.goto(url, { waitUntil: 'networkidle2', timeout: 20000 });
         
         // Scroll slightly
@@ -356,6 +381,14 @@ async function checkUrls(config: AppConfig) {
         await page.setUserAgent(config.userAgent);
       }
 
+      // Inject dynamic webdriver bypass for maximum visitor tracking trust
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        (window as any).chrome = { app: { isInstalled: false }, runtime: {} };
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      });
+
       const startTime = Date.now();
       let status: 'up' | 'down' = 'up';
       let statusCode = 200;
@@ -406,7 +439,7 @@ async function checkUrls(config: AppConfig) {
           discoveredLinks = await extractLinksFromPage(page, targetUrl, config.blockedLinks);
           
           // Physically click buttons/links/images, wait for load, and close
-          await simulateClicksAndEngagement(page, targetUrl, config);
+          await simulateClicksAndEngagement(page, targetUrl, config, proxyConfig);
         }
       }
 
@@ -576,6 +609,14 @@ async function checkSubLinks(browser: any, links: CrawledLink[], proxyConfig: an
         await page.authenticate({ username: proxyConfig.username, password: proxyConfig.password });
       }
       if (config.userAgent) await page.setUserAgent(config.userAgent);
+      
+      // Inject dynamic webdriver bypass for maximum visitor tracking trust
+      await page.evaluateOnNewDocument(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        (window as any).chrome = { app: { isInstalled: false }, runtime: {} };
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+      });
       
       const startTime = Date.now();
       let status: 'up' | 'down' = 'up';
