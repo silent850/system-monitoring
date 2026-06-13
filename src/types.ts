@@ -1,56 +1,35 @@
-export type Monitor = {
-  id: string | number;
-  name: string;
+export interface UptimeLog {
+  id: string;
   url: string;
-  type: "site" | "page" | "api";
-  status: "up" | "down" | "paused";
-  lastChecked: number;
-  avgLoadTime: number;
-  company: string;
-};
+  status: 'up' | 'down';
+  timestamp: string;
+  responseTime?: number;
+  errorDetails?: string;
+  proxyUsed?: string | null;
+  isSubLink?: boolean;
+  parentUrl?: string;
+}
 
-export type LogEntry = {
-  id: string | number;
-  monitorId: string | number;
-  timestamp: number;
-  status: "up" | "down" | "error";
-  loadTime: number;
-};
+export interface CrawledLink {
+  id: string;
+  parentUrl: string;
+  href: string;
+  linkText: string;
+  isStatic: boolean;
+  isDynamic: boolean;
+  lastChecked?: string;
+  lastStatus?: 'up' | 'down' | 'pending';
+  responseTime?: number;
+  isBlocked: boolean;
+  depth: number;
+}
 
-export type SessionStep = {
-  id: string | number;
-  sessionId: string | number;
-  timestamp: number;
-  message: string;
-  status: "ok" | "info" | "fail";
-  durationMs?: number;
-};
-
-export type DetectedLink = {
-  id: string | number;
-  sessionId: string | number;
-  url: string;
-  elementType: "a" | "button" | "img";
-  elementLabel?: string;
-  httpStatus?: number;
-  loadTimeMs?: number;
-  state: "discovered" | "ignored" | "blocked";
-};
-
-export type Session = {
-  id: string | number;
-  monitorId: string | number;
-  startedAt: number;
-  completedAt?: number;
-  status: "running" | "passed" | "failed";
-  proxyUsed?: string;
-  userAgent?: string;
-  simulateHuman: boolean;
-  humanProfile?: "none" | "light" | "moderate";
-  crawlerDepth: number;
-  maxLinks: number;
-  followExternal: boolean;
-  totalDuration?: number;
-  linksFound: number;
-  linksFailed: number;
-};
+export interface AppConfig {
+  urls: string[];
+  proxies: string[];
+  email: string;
+  intervalSeconds: number;
+  blockedLinks: string[];
+  crawlEnabled: boolean;
+  crawlDepth: number;
+}

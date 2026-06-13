@@ -1,63 +1,191 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router";
-import Installer from "./pages/Installer";
-import Login from "./pages/Login";
-import AdminLayout from "./pages/admin/Layout";
-import Dashboard from "./pages/admin/Dashboard";
-import Monitors from "./pages/admin/Monitors";
-import MonitorDetail from "./pages/admin/MonitorDetail";
-import Billing from "./pages/admin/Billing";
-import LiveActivity from "./pages/admin/LiveActivity";
-import Logs from "./pages/admin/Logs";
-import Reports from "./pages/admin/Reports";
-import Proxies from "./pages/admin/Proxies";
-import Settings from "./pages/admin/Settings";
-import Users from "./pages/admin/Users";
-import Companies from "./pages/admin/Companies";
+import { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
+import Layout from './components/Layout';
+import Dashboard from './components/Dashboard';
+import Settings from './components/Settings';
+import Logs from './components/Logs';
+import LinkCrawler from './components/LinkCrawler';
+import Login from './components/Login';
+import Installer from './components/Installer';
+import { UptimeLog, CrawledLink } from './types';
+import axios from 'axios';
+import { Loader2 } from 'lucide-react';
 
-import PortalLogin from "./pages/portal/Login";
-import PortalLayout from "./pages/portal/Layout";
-import PortalDashboard from "./pages/portal/Dashboard";
-import PortalMonitors from "./pages/portal/Monitors";
+function ProtectedApp() {
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'logs' | 'crawler' | 'settings'>('dashboard');
+  const [logs, setLogs] = useState<UptimeLog[]>([]);
+  const [crawledLinks, setCrawledLinks] = useState<CrawledLink[]>([]);
+  
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [userRoles, setUserRoles] = useState<string[]>([]);
+  const [isVerifying, setIsVerifying] = useState(true);
+  const navigate = useNavigate();
 
-function PlaceholderView() {
+  useEffect(() => {
+    const interceptor = axios.interceptors.request.use((config) => {
+      const token = localStorage.getItem('uptime_token');
+      if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+      }
+      return config;
+    });
+
+    const verifyToken = async () => {
+      const token = localStorage.getItem('uptime_token');
+      if (!token) {
+        setIsVerifying(false);
+        return;
+      }
+      try {
+        const res = await axios.get('/api/auth/verify');
+        setIsAuthenticated(true);
+        setUserRoles(res.data.roles || []);
+      } catch (err) {
+        localStorage.removeItem('uptime_token');
+      } finally {
+        setIsVerifying(false);
+      }
+    };
+
+    verifyToken();
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const fetchLogs = async () => {
+      try {
+        const res = await axios.get('/api/logs');
+        setLogs(res.data);
+      } catch (err) {
+        console.error('Failed to fetch logs', err);
+        if (axios.isAxiosError(err) && err.response?.status === 401) {
+          localStorage.removeItem('uptime_token');
+          setIsAuthenticated(false);
+        }
+      }
+    };
+
+    const fetchCrawledLinks = async () => {
+      if (activeTab !== 'crawler') return;
+      try {
+        const res = await axios.get('/api/crawled-links');
+        setCrawledLinks(res.data);
+      } catch (err) {
+        console.error('Failed to fetch crawled links', err);
+      }
+    };
+
+    fetchLogs();
+    fetchCrawledLinks();
+    
+    const interval = setInterval(() => {
+      fetchLogs();
+      fetchCrawledLinks();
+    }, 5000);
+    
+    return () => clearInterval(interval);
+  }, [activeTab, isAuthenticated]);
+
+  const handleLoginSuccess = (token: string, roles: string[]) => {
+    localStorage.setItem('uptime_token', token);
+    setUserRoles(roles);
+    setIsAuthenticated(true);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('uptime_token');
+    setIsAuthenticated(false);
+    setUserRoles([]);
+  };
+
+  if (isVerifying) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Login onLoginSuccess={handleLoginSuccess} />;
+  }
+
+  const isAdmin = userRoles.includes('Admin');
+
+  if (!isAdmin) {
+    // Basic portal for standard users
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-300 p-8">
+        <div className="max-w-4xl mx-auto pb-4 flex justify-between items-center border-b border-slate-800 mb-8">
+          <h1 className="text-2xl font-bold text-white">Customer Portal</h1>
+          <button onClick={handleLogout} className="text-sm px-4 py-2 border border-slate-800 rounded hover:bg-slate-800">Logout</button>
+        </div>
+        <div className="bg-slate-900 border border-slate-800 rounded p-8">
+          <p>Welcome to the portal. Your monitors will appear here.</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex flex-col items-center justify-center py-20 text-center">
-      <h2 className="text-xl font-semibold text-gray-900 mb-2">Module Under Construction</h2>
-      <p className="text-gray-500">This feature is being developed.</p>
-    </div>
+    <Layout activeTab={activeTab} onTabChange={setActiveTab} onLogout={handleLogout}>
+      {activeTab === 'dashboard' && <Dashboard logs={logs} />}
+      {activeTab === 'logs' && <Logs logs={logs} />}
+      {activeTab === 'crawler' && <LinkCrawler links={crawledLinks} setLinks={setCrawledLinks} />}
+      {activeTab === 'settings' && <Settings />}
+    </Layout>
+  );
+}
+
+function BootComponent() {
+  const [isVerifying, setIsVerifying] = useState(true);
+  const [isInstalled, setIsInstalled] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const checkInstaller = async () => {
+      try {
+        const res = await axios.get('/api/installer/status');
+        setIsInstalled(res.data.isInstalled);
+      } catch(err) {
+        setIsInstalled(false);
+      } finally {
+        setIsVerifying(false);
+      }
+    };
+    checkInstaller();
+  }, []);
+
+  if (isVerifying) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-indigo-500 animate-spin" />
+      </div>
+    );
+  }
+
+  return (
+    <Routes>
+      <Route path="/install" element={
+        isInstalled ? <Navigate to="/admin" /> : <Installer onComplete={() => window.location.href = '/admin'} />
+      } />
+      <Route path="/admin/*" element={
+        !isInstalled ? <Navigate to="/install" /> : <ProtectedApp />
+      } />
+      <Route path="*" element={<Navigate to="/admin" />} />
+    </Routes>
   );
 }
 
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<Navigate to="/admin" replace />} />
-        <Route path="/install" element={<Installer />} />
-        <Route path="/login" element={<Login />} />
-        
-        <Route path="/portal/login" element={<PortalLogin />} />
-        <Route path="/portal" element={<PortalLayout />}>
-          <Route index element={<PortalDashboard />} />
-          <Route path="monitors" element={<PortalMonitors />} />
-        </Route>
-        
-        {/* Admin Portal Layout */}
-        <Route path="/admin" element={<AdminLayout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="monitors" element={<Monitors />} />
-          <Route path="monitors/:id" element={<MonitorDetail />} />
-          <Route path="live" element={<LiveActivity />} />
-          <Route path="logs" element={<Logs />} />
-          <Route path="reports" element={<Reports />} />
-          <Route path="proxies" element={<Proxies />} />
-          <Route path="users" element={<Users />} />
-          <Route path="companies" element={<Companies />} />
-          <Route path="settings" element={<Settings />} />
-          <Route path="billing" element={<Billing />} />
-          <Route path="*" element={<PlaceholderView />} />
-        </Route>
-      </Routes>
+      <BootComponent />
     </BrowserRouter>
   );
 }
+

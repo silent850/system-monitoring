@@ -1,561 +1,951 @@
-import express from "express";
-import path from "path";
-import crypto from "crypto";
-import { drizzle } from "drizzle-orm/node-postgres";
-import pg from "pg";
-import { eq, desc, and } from "drizzle-orm";
-import cookieParser from "cookie-parser";
-import * as schema from "./src/db/schema.js";
+import express from 'express';
+import path from 'path';
+import { createServer as createViteServer } from 'vite';
+import axios from 'axios';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import nodemailer from 'nodemailer';
+import { AppConfig, UptimeLog, CrawledLink } from './src/types.ts';
+import dotenv from 'dotenv';
+import crypto from 'crypto';
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import { db } from './src/db/index.ts';
+import { 
+  users, 
+  config, 
+  uptimeLogs as uptimeLogsTable, 
+  crawledLinks as crawledLinksTable,
+  systemSettings,
+  companies,
+  roles,
+  permissions,
+  userRoles,
+  rolePermissions,
+  smtpSettings,
+  paymentGateways
+} from './src/db/schema.ts';
+import { eq, desc, inArray } from 'drizzle-orm';
 
-const { Pool } = pg;
+dotenv.config();
+
+// Global App State (In-Memory for this architecture, backed by DB)
+let appConfig: AppConfig = {
+  urls: ['https://example.com'],
+  proxies: [],
+  email: '',
+  intervalSeconds: 60,
+  blockedLinks: [],
+  crawlEnabled: false,
+  crawlDepth: 1,
+};
+
+let uptimeLogs: UptimeLog[] = [];
+const MAX_LOGS = 1000;
+const MAX_CRAWLED_LINKS = 5000;
+
+let crawledLinksCache: CrawledLink[] = [];
+let usersCache: any[] = [];
+const JWT_SECRET = process.env.JWT_SECRET || 'uptime-monitor-fallback-secret-key-2024';
+
+const trimCrawledLinksCache = async () => {
+  if (crawledLinksCache.length > MAX_CRAWLED_LINKS) {
+    const mapped = crawledLinksCache.map((link, index) => ({ link, index }));
+    mapped.sort((a, b) => {
+      const aTime = a.link.lastChecked ? new Date(a.link.lastChecked).getTime() : 0;
+      const bTime = b.link.lastChecked ? new Date(b.link.lastChecked).getTime() : 0;
+      
+      if (aTime > 0 && bTime > 0) return bTime - aTime;
+      if (aTime === 0 && bTime === 0) return b.index - a.index;
+      if (aTime === 0) return -1;
+      return 1;
+    });
+
+    const toRemove = mapped.slice(MAX_CRAWLED_LINKS).map(m => m.link);
+    crawledLinksCache = mapped.slice(0, MAX_CRAWLED_LINKS).map(m => m.link);
+
+    if (toRemove.length > 0) {
+       try {
+         const idsToRemove = toRemove.map(l => l.id);
+         // Process in smaller batches if needed, but for 5000 it is fine
+         await db.delete(crawledLinksTable).where(inArray(crawledLinksTable.id, idsToRemove));
+       } catch (e) {
+         console.error('Failed to clear old crawled links from DB:', e);
+       }
+    }
+  }
+};
+
+// Database Persistence Helpers
+const loadStateFromDB = async () => {
+  try {
+    const configResult = await db.select().from(config).where(eq(config.id, 'main'));
+    if (configResult.length > 0) {
+      const c = configResult[0];
+      appConfig = { 
+        ...appConfig, 
+        urls: Array.isArray(c.urls) ? (c.urls as string[]) : [],
+        proxies: Array.isArray(c.proxies) ? (c.proxies as string[]) : [],
+        email: c.email || '',
+        intervalSeconds: c.intervalSeconds || 60,
+        blockedLinks: Array.isArray(c.blockedLinks) ? (c.blockedLinks as string[]) : [],
+        crawlEnabled: c.crawlEnabled ?? false,
+        crawlDepth: c.crawlDepth ?? 1,
+      };
+      console.log('Loaded config from DB');
+    } else {
+      await db.insert(config).values({
+        id: 'main',
+        urls: appConfig.urls,
+        proxies: appConfig.proxies,
+        email: appConfig.email,
+        intervalSeconds: appConfig.intervalSeconds,
+        blockedLinks: appConfig.blockedLinks,
+        crawlEnabled: appConfig.crawlEnabled,
+        crawlDepth: appConfig.crawlDepth,
+      });
+      console.log('Seeded initial config to DB');
+    }
+  } catch (err: any) {
+    console.warn('Could not load config from DB:', err.message || err);
+  }
+
+  try {
+    const logsResult = await db.select().from(uptimeLogsTable).orderBy(desc(uptimeLogsTable.timestamp)).limit(MAX_LOGS);
+    uptimeLogs = logsResult.map(l => ({
+      ...l,
+      status: l.status as 'up' | 'down',
+      responseTime: l.responseTime || undefined,
+      errorDetails: l.errorDetails || undefined,
+      proxyUsed: l.proxyUsed || undefined,
+      isSubLink: l.isSubLink || undefined,
+      parentUrl: l.parentUrl || undefined,
+    }));
+    console.log(`Loaded ${uptimeLogs.length} logs from DB`);
+  } catch (err: any) {
+    console.warn('Could not load logs from DB:', err.message || err);
+  }
+
+  try {
+    const linksResult = await db.select().from(crawledLinksTable);
+    crawledLinksCache = linksResult.map(l => ({
+      ...l,
+      lastStatus: (l.lastStatus as 'up' | 'down' | 'pending') || 'pending',
+      lastChecked: l.lastChecked || undefined,
+      responseTime: l.responseTime || undefined,
+      isStatic: !!l.isStatic,
+      isDynamic: !!l.isDynamic,
+      isBlocked: !!l.isBlocked,
+      depth: l.depth || 1,
+    }));
+    console.log(`Loaded ${crawledLinksCache.length} crawled links from DB`);
+    await trimCrawledLinksCache();
+  } catch (err: any) {
+    console.warn('Could not load crawled links from DB:', err.message || err);
+  }
+
+  // Load system settings
+  try {
+    const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+    if (sysResult.length === 0) {
+      // Create default unpaid/uninstalled system setting
+      await db.insert(systemSettings).values({
+        id: 'main',
+        isInstalled: false,
+      });
+      console.log('Created initial system_settings (not installed)');
+    } else {
+      console.log(`System installed: ${sysResult[0].isInstalled}`);
+    }
+  } catch (err: any) {
+    console.warn('Could not load system settings from DB:', err.message || err);
+  }
+
+  // Load cache of users
+  try {
+    const usersResult = await db.select().from(users);
+    usersCache = usersResult;
+  } catch (err: any) {
+    console.warn('Could not load users from DB:', err.message || err);
+  }
+};
+
+const persistConfigToDB = async () => {
+  try {
+    await db.update(config).set({
+      urls: appConfig.urls,
+      proxies: appConfig.proxies,
+      email: appConfig.email,
+      intervalSeconds: appConfig.intervalSeconds,
+      blockedLinks: appConfig.blockedLinks,
+      crawlEnabled: appConfig.crawlEnabled,
+      crawlDepth: appConfig.crawlDepth,
+    }).where(eq(config.id, 'main'));
+  } catch (err) {
+    console.error('Failed to save config to DB:', err);
+  }
+};
+
+const persistCrawledLinkToDB = async (link: CrawledLink) => {
+  try {
+    await db.insert(crawledLinksTable).values({
+      id: link.id,
+      parentUrl: link.parentUrl,
+      href: link.href,
+      linkText: link.linkText,
+      isStatic: link.isStatic,
+      isDynamic: link.isDynamic,
+      lastChecked: link.lastChecked,
+      lastStatus: link.lastStatus,
+      responseTime: link.responseTime,
+      isBlocked: link.isBlocked,
+      depth: link.depth,
+    }).onConflictDoUpdate({
+      target: crawledLinksTable.id,
+      set: {
+        isBlocked: link.isBlocked,
+        lastChecked: link.lastChecked,
+        lastStatus: link.lastStatus,
+        responseTime: link.responseTime,
+      }
+    });
+  } catch (err) {
+    console.error('Failed to save crawled link to DB:', err);
+  }
+};
+
+const persistLogToDB = async (log: UptimeLog) => {
+  try {
+    await db.insert(uptimeLogsTable).values({
+      id: log.id,
+      url: log.url,
+      status: log.status,
+      timestamp: log.timestamp,
+      responseTime: log.responseTime,
+      errorDetails: log.errorDetails,
+      proxyUsed: log.proxyUsed,
+      isSubLink: log.isSubLink,
+      parentUrl: log.parentUrl,
+    });
+  } catch (err) {
+    console.error('Failed to save log to DB:', err);
+  }
+};
+
+const clearLogsInDB = async () => {
+  try {
+    await db.delete(uptimeLogsTable);
+  } catch (err) {
+    console.error('Failed to clear logs in DB:', err);
+  }
+};
+
+// Email Transporter Setup 
+const getTransporter = () => {
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_USER || !SMTP_PASS) {
+    return null;
+  }
+  return nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: parseInt(SMTP_PORT || '587'),
+    secure: SMTP_PORT === '465',
+    auth: {
+      user: SMTP_USER,
+      pass: SMTP_PASS,
+    },
+  });
+};
+
+const sendEmailAlert = async (url: string, errorMsg: string) => {
+  if (!appConfig.email) return;
+  const transporter = getTransporter();
+  if (!transporter) {
+    console.warn(`[Alert Mock] Alert email skipped due to missing SMTP environment variables. Would have sent alert to ${appConfig.email} for ${url}`);
+    return;
+  }
+
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_USER || 'no-reply@uptimemonitor',
+      to: appConfig.email,
+      subject: `🚨 Alert: ${url} is Down`,
+      text: `Your monitored site ${url} appears to be down.\n\nError details:\n${errorMsg}\n\nTime: ${new Date().toISOString()}`,
+    });
+    console.log(`Alert email sent to ${appConfig.email} for ${url}`);
+  } catch (error) {
+    console.error('Failed to send email alert:', error);
+  }
+};
+
+// Monitoring Loop Logic
+let monitorIntervalId: NodeJS.Timeout | null = null;
+
+// Link Crawler Logic
+const extractText = (str: string) => str.replace(/<[^>]+>/g, '').trim().substring(0, 100);
+
+const discoverLinks = async (targetUrl: string, parentUrl: string, html: string, depth: number) => {
+  const aTagRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match;
+  
+  const forbiddenPatterns = ['javascript:', 'mailto:', 'tel:', '#', 'data:', 'blob:'];
+
+  while ((match = aTagRegex.exec(html)) !== null) {
+    const rawHref = match[1];
+    let linkText = extractText(match[2]);
+    if (!linkText) linkText = 'Link';
+
+    if (forbiddenPatterns.some(p => rawHref.startsWith(p))) continue;
+
+    try {
+      const resolvedUrl = new URL(rawHref, targetUrl); // resolve relative to root target
+      const fullHref = resolvedUrl.href;
+
+      const targetDomain = new URL(targetUrl).hostname;
+      if (resolvedUrl.hostname !== targetDomain) continue;
+
+      const isDynamic = fullHref.includes('?') || fullHref.includes('#');
+
+      const id = crypto.createHash('sha256').update(parentUrl + fullHref).digest('hex');
+
+      const existing = crawledLinksCache.find(l => l.id === id);
+      const isBlocked = appConfig.blockedLinks.some(blk => fullHref.includes(blk));
+
+      if (existing) {
+         if (existing.isBlocked !== isBlocked) {
+            existing.isBlocked = isBlocked;
+            await persistCrawledLinkToDB(existing);
+         }
+         continue;
+      }
+
+      if (crawledLinksCache.length >= MAX_CRAWLED_LINKS) {
+        console.warn(`[Crawler] Max crawled links limit (${MAX_CRAWLED_LINKS}) reached. Skipping adding new links.`);
+        break;
+      }
+
+      const newLink: CrawledLink = { 
+        id,
+        parentUrl,
+        href: fullHref,
+        linkText,
+        isStatic: !isDynamic,
+        isDynamic,
+        isBlocked,
+        lastStatus: 'pending',
+        depth
+      };
+
+      crawledLinksCache.push(newLink);
+      await trimCrawledLinksCache();
+      await persistCrawledLinkToDB(newLink);
+    } catch (e) {
+      // Invalid URL syntax
+    }
+  }
+};
+
+const maskProxyUrl = (proxyUrl: string | null): string | null => {
+  if (!proxyUrl) return null;
+  return proxyUrl.replace(/:([^:@]+)@/, ':****@');
+};
+
+const processSubLinks = async (targetUrl: string, proxyAgent: any) => {
+  const eligibleLinks = crawledLinksCache
+    .filter(l => l.parentUrl === targetUrl && !l.isBlocked)
+    .sort((a, b) => {
+      if (a.lastStatus === 'pending' && b.lastStatus !== 'pending') return -1;
+      if (a.lastStatus !== 'pending' && b.lastStatus === 'pending') return 1;
+      if (!a.lastChecked) return -1;
+      if (!b.lastChecked) return 1;
+      return new Date(a.lastChecked).getTime() - new Date(b.lastChecked).getTime();
+    })
+    .slice(0, 10);
+
+  for (const link of eligibleLinks) {
+    const start = Date.now();
+    try {
+      const res = await axios.get(link.href, {
+        httpsAgent: proxyAgent,
+        httpAgent: proxyAgent,
+        timeout: 10000,
+        validateStatus: (status) => status >= 200 && status < 400
+      });
+      const responseTime = Date.now() - start;
+
+      link.lastStatus = 'up';
+      link.lastChecked = new Date().toISOString();
+      link.responseTime = responseTime;
+
+      const newLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url: link.href,
+        status: 'up',
+        timestamp: link.lastChecked,
+        responseTime,
+        proxyUsed: proxyAgent ? maskProxyUrl((proxyAgent as any).proxy?.href || 'Proxy') : null,
+        isSubLink: true,
+        parentUrl: targetUrl
+      };
+      
+      uptimeLogs.unshift(newLog);
+      await persistLogToDB(newLog);
+
+      if (appConfig.crawlDepth >= 2 && link.depth < appConfig.crawlDepth) {
+         if (typeof res.data === 'string') {
+             await discoverLinks(targetUrl, targetUrl, res.data, link.depth + 1); 
+         }
+      }
+
+    } catch (error: any) {
+      const responseTime = Date.now() - start;
+      const errorMsg = error.message || 'Unknown error';
+      
+      link.lastStatus = 'down';
+      link.lastChecked = new Date().toISOString();
+      link.responseTime = responseTime;
+
+      const newErrLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url: link.href,
+        status: 'down',
+        timestamp: link.lastChecked,
+        responseTime,
+        proxyUsed: proxyAgent ? maskProxyUrl((proxyAgent as any).proxy?.href || 'Proxy') : null,
+        errorDetails: errorMsg,
+        isSubLink: true,
+        parentUrl: targetUrl
+      };
+
+      uptimeLogs.unshift(newErrLog);
+      await persistLogToDB(newErrLog);
+      await sendEmailAlert(`Sub-link: ${link.href}`, `A sub-link crashed on your site:\nURL: ${link.href}\nFound on: ${targetUrl}\nError: ${errorMsg}`);
+    }
+
+    await persistCrawledLinkToDB(link);
+    if (uptimeLogs.length > MAX_LOGS) {
+      uptimeLogs = uptimeLogs.slice(0, MAX_LOGS);
+    }
+  }
+};
+
+const checkUrls = async () => {
+  if (appConfig.urls.length === 0) return;
+
+  for (const url of appConfig.urls) {
+    let proxyUsed: string | null = null;
+    let proxyAgent: HttpsProxyAgent<string> | undefined = undefined;
+
+    if (appConfig.proxies.length > 0) {
+      const shuffledProxies = [...appConfig.proxies].sort(() => 0.5 - Math.random());
+      
+      for (const proxy of shuffledProxies) {
+        try {
+          const proxyUrlString = proxy.startsWith('http') ? proxy : `http://${proxy}`;
+          new URL(proxyUrlString);
+          proxyAgent = new HttpsProxyAgent(proxyUrlString);
+          proxyUsed = maskProxyUrl(proxy);
+          break;
+        } catch (err) {
+          console.warn(`Invalid proxy format, skipping: ${proxy}`);
+        }
+      }
+      
+      if (!proxyAgent) {
+        console.warn('All proxies invalid, falling back to direct connection.');
+      }
+    }
+
+    const start = Date.now();
+    let htmlContent: string | null = null;
+    try {
+      const res = await axios.get(url, {
+        httpsAgent: proxyAgent,
+        httpAgent: proxyAgent,
+        timeout: 10000,
+        validateStatus: (status) => status >= 200 && status < 400
+      });
+      const responseTime = Date.now() - start;
+      if (typeof res.data === 'string') htmlContent = res.data;
+
+      const newLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url,
+        status: 'up',
+        timestamp: new Date().toISOString(),
+        responseTime,
+        proxyUsed,
+      };
+      
+      uptimeLogs.unshift(newLog);
+      await persistLogToDB(newLog);
+
+    } catch (error: any) {
+      const responseTime = Date.now() - start;
+      const errorMsg = error.message || 'Unknown error';
+      
+      const newErrLog: UptimeLog = {
+        id: crypto.randomUUID(),
+        url,
+        status: 'down',
+        timestamp: new Date().toISOString(),
+        responseTime,
+        proxyUsed,
+        errorDetails: errorMsg,
+      };
+
+      uptimeLogs.unshift(newErrLog);
+      await persistLogToDB(newErrLog);
+
+      await sendEmailAlert(url, errorMsg);
+    }
+
+    if (appConfig.crawlEnabled) {
+      if (htmlContent) {
+        await discoverLinks(url, url, htmlContent, 1);
+      }
+      await processSubLinks(url, proxyAgent);
+    }
+
+    if (uptimeLogs.length > MAX_LOGS) {
+      uptimeLogs = uptimeLogs.slice(0, MAX_LOGS);
+    }
+  }
+};
+
+const restartMonitoringLoop = () => {
+  if (monitorIntervalId) {
+    clearInterval(monitorIntervalId);
+  }
+  
+  const intervalMs = Math.max(10, appConfig.intervalSeconds) * 1000;
+  
+  monitorIntervalId = setInterval(() => {
+    checkUrls().catch(err => console.error("Error in check loop:", err));
+  }, intervalMs);
+
+  checkUrls().catch(err => console.error("Error in check loop:", err));
+};
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
-  // Real DB connection logic
-  let db: ReturnType<typeof drizzle> | null = null;
-  const dbUrl = process.env.DATABASE_URL;
-  if (dbUrl) {
-    console.log("Found DATABASE_URL, connecting to PostgreSQL in production mode...");
-    const pool = new Pool({ connectionString: dbUrl });
-    db = drizzle(pool);
-  } else {
-    console.log("No DATABASE_URL found, running in limited memory mode...");
-  }
+  app.use(express.json());
 
-  app.use(express.json({
-    verify: (req: any, res, buf) => {
-      req.rawBody = buf;
+  const requireAuthMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized: Missing or invalid token' });
     }
-  }));
-  app.use(cookieParser());
-
-  // In-memory pseudo DB fallback
-  const memoryDb: any = {
-    settings: {
-      systemName: "Uptime Pulse",
-      logo: "",
-      installed: dbUrl ? true : false,
-      sonicPesaKey: process.env.SONICPESA_API_KEY || "",
-      sonicPesaSecret: process.env.SONICPESA_API_SECRET || "",
-    },
-    monitors: [
-      { id: 1, name: "API Production", url: "https://api.example.com/health", type: "api", status: "up", checkInterval: 60, lastChecked: Date.now(), avgLoadTime: 120, company: "Acme Corp", companyId: 1 },
-      { id: 2, name: "Marketing Site", url: "https://example.com", type: "site", status: "down", checkInterval: 60, lastChecked: Date.now(), avgLoadTime: 850, company: "Acme Corp", companyId: 1 }
-    ],
-    companies: [
-      { id: 1, name: "Acme Corp", billingPlan: "pro" },
-      { id: 2, name: "Globex Inc", billingPlan: "free" }
-    ],
-    users: [
-      { id: 1, name: "Admin", email: "admin@example.com", role: "Super Admin" },
-      { id: 2, name: "John Doe", email: "john@acmecorp.com", role: "Viewer" }
-    ],
-    proxies: [],
-    logs: [],
-    sessions: [],
-    sessionSteps: [],
-    detectedLinks: []
+    const token = authHeader.substring(7);
+    try {
+      const decoded = jwt.verify(token, JWT_SECRET);
+      (req as any).user = decoded;
+      next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Unauthorized: Invalid token' });
+    }
   };
 
+  const authRouter = express.Router();
+  
+  authRouter.post('/login', async (req, res) => {
+    const { email, password } = req.body;
+    
+    try {
+      // Refresh user from DB to get latest
+      const dbUsers = await db.select().from(users).where(eq(users.email, email));
+      if (dbUsers.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+      
+      const foundUser = dbUsers[0];
+      
+      const pwdMatch = await bcrypt.compare(password, foundUser.passwordHash);
+      if (!pwdMatch) return res.status(401).json({ error: 'Invalid credentials' });
+      
+      // Get roles
+      const userRolesData = await db.select({ roleName: roles.name })
+        .from(userRoles)
+        .innerJoin(roles, eq(userRoles.roleId, roles.id))
+        .where(eq(userRoles.userId, foundUser.id));
+
+      const roleNames = userRolesData.map(ur => ur.roleName);
+
+      const token = jwt.sign({ 
+        email: foundUser.email, 
+        id: foundUser.id,
+        roles: roleNames
+      }, JWT_SECRET, { expiresIn: '24h' });
+      
+      res.json({ token, email: foundUser.email, roles: roleNames });
+    } catch (err: any) {
+      console.error('Login error:', err);
+      res.status(500).json({ error: 'Server error: ' + err.message });
+    }
+  });
+
+  authRouter.post('/register', async (req, res) => {
+    const { name, email, password, companyName } = req.body;
+    try {
+      // Check if user exists
+      const existingUser = await db.select().from(users).where(eq(users.email, email));
+      if (existingUser.length > 0) return res.status(400).json({ error: 'Email already registered' });
+
+      // Create company
+      const companyId = crypto.randomUUID();
+      await db.insert(companies).values({
+        id: companyId,
+        name: companyName,
+      });
+
+      // Create user
+      const userId = crypto.randomUUID();
+      const passwordHash = await bcrypt.hash(password, 10);
+      await db.insert(users).values({
+        id: userId,
+        companyId: companyId,
+        name,
+        email,
+        passwordHash,
+      });
+
+      // Find 'User' role and assign
+      const roleResult = await db.select().from(roles).where(eq(roles.name, 'User'));
+      if (roleResult.length > 0) {
+        await db.insert(userRoles).values({ userId, roleId: roleResult[0].id });
+      }
+
+      // Automatically log them in
+      const token = jwt.sign({ email, id: userId, roles: ['User'] }, JWT_SECRET, { expiresIn: '24h' });
+      res.json({ token, email, roles: ['User'] });
+    } catch (err: any) {
+      console.error('Register error:', err);
+      res.status(500).json({ error: 'Server error: ' + err.message });
+    }
+  });
+
+  authRouter.post('/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    
+    try {
+      let foundUser = usersCache.find(u => u.email === email);
+      
+      if (!foundUser) {
+        return res.json({ message: 'If an account exists, a reset link was sent.' });
+      }
+      
+      const resetToken = crypto.randomBytes(3).toString('hex').toUpperCase();
+      const resetTokenExpiry = Date.now() + 3600000;
+      
+      foundUser.resetToken = resetToken;
+      foundUser.resetTokenExpiry = new Date(resetTokenExpiry);
+      
+      try {
+        await db.update(users)
+                .set({ resetToken, resetTokenExpiry: new Date(resetTokenExpiry) })
+                .where(eq(users.id, foundUser.id));
+      } catch (err: any) {
+        console.warn('Could not save reset token to DB:', err.message);
+      }
+      
+      const transporter = getTransporter();
+      if (transporter) {
+        await transporter.sendMail({
+          from: process.env.SMTP_USER || 'no-reply@uptimemonitor',
+          to: email,
+          subject: 'Your password reset code',
+          text: `Your password reset code is: ${resetToken}\n\nIt expires in 1 hour.`
+        });
+      }
+      
+      res.json({ message: 'If an account exists, a reset link was sent.' });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  authRouter.post('/reset-password', async (req, res) => {
+    const { email, token, newPassword } = req.body;
+    
+    try {
+      let foundUser = usersCache.find(u => u.email === email);
+      
+      if (!foundUser || foundUser.resetToken !== token || !foundUser.resetTokenExpiry || foundUser.resetTokenExpiry.getTime() < Date.now()) {
+        return res.status(400).json({ error: 'Invalid or expired token' });
+      }
+      
+      foundUser.passwordHash = await bcrypt.hash(newPassword, 10);
+      foundUser.resetToken = null;
+      foundUser.resetTokenExpiry = null;
+      
+      try {
+        await db.update(users)
+                .set({ passwordHash: foundUser.passwordHash, resetToken: null, resetTokenExpiry: null })
+                .where(eq(users.id, foundUser.id));
+      } catch (err: any) {
+        console.warn('Could not save new password to DB:', err.message);
+      }
+      res.json({ message: 'Password reset successfully' });
+    } catch (err) {
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
+  authRouter.get('/verify', requireAuthMiddleware, (req, res) => {
+    res.json({ valid: true, email: (req as any).user.email, roles: (req as any).user.roles || [] });
+  });
+
+  app.use('/api/auth', authRouter);
+
+  // Installer Routes (Public initially)
+  const installerRouter = express.Router();
+  installerRouter.get('/status', async (req, res) => {
+    try {
+      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      if (sysResult.length === 0) {
+        return res.json({ isInstalled: false });
+      }
+      return res.json({ isInstalled: !!sysResult[0].isInstalled, settings: sysResult[0] });
+    } catch (err) {
+      return res.status(500).json({ error: 'Failed to check system status' });
+    }
+  });
+
+  installerRouter.post('/install', async (req, res) => {
+    try {
+      // Check if already installed
+      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      if (sysResult.length > 0 && sysResult[0].isInstalled) {
+        return res.status(403).json({ error: 'System is already installed' });
+      }
+
+      const {
+        systemName, companyName, logoUrl, faviconUrl, supportEmail, timezone,
+        adminName, adminEmail, adminPassword,
+        smtpHost, smtpPort, smtpUsername, smtpPassword, smtpEncryption,
+        sonicPesaAccessKey, sonicPesaSecretKey, sonicPesaWebhookSecret, sonicPesaEnv
+      } = req.body;
+
+      // 1. Create Roles & Permissions
+      const adminRole = { id: crypto.randomUUID(), name: 'Admin' };
+      const userRole = { id: crypto.randomUUID(), name: 'User' };
+      await db.insert(roles).values([adminRole, userRole]);
+
+      // 2. Create System Admin user (no company id for super admin initially, or could assign to a system company)
+      const passwordHash = await bcrypt.hash(adminPassword, 10);
+      const adminUser = {
+        id: crypto.randomUUID(),
+        email: adminEmail,
+        name: adminName,
+        passwordHash,
+      };
+      await db.insert(users).values(adminUser);
+      await db.insert(userRoles).values({ userId: adminUser.id, roleId: adminRole.id });
+
+      // 3. Save SMTP Settings
+      await db.insert(smtpSettings).values({
+        id: 'main',
+        host: smtpHost,
+        port: smtpPort ? parseInt(smtpPort) : 587,
+        username: smtpUsername,
+        password: smtpPassword,
+        encryption: smtpEncryption,
+        fromEmail: supportEmail,
+        fromName: companyName || systemName,
+      }).onConflictDoUpdate({ target: smtpSettings.id, set: {
+        host: smtpHost,
+        port: smtpPort ? parseInt(smtpPort) : 587,
+        username: smtpUsername,
+        password: smtpPassword,
+        encryption: smtpEncryption,
+        fromEmail: supportEmail,
+        fromName: companyName || systemName,
+      }});
+
+      // 4. Save Payment Gateway Settings
+      await db.insert(paymentGateways).values({
+        id: 'sonicpesa',
+        name: 'SonicPesa',
+        accessKey: sonicPesaAccessKey,
+        secretKey: sonicPesaSecretKey,
+        webhookSecret: sonicPesaWebhookSecret,
+        environment: sonicPesaEnv || 'sandbox',
+        isActive: !!sonicPesaAccessKey,
+      });
+
+      // 5. Update System Settings to Installed
+      await db.insert(systemSettings).values({
+        id: 'main',
+        systemName: systemName,
+        companyName: companyName,
+        logoUrl: logoUrl,
+        faviconUrl: faviconUrl,
+        supportEmail: supportEmail,
+        timezone: timezone || 'UTC',
+        isInstalled: true,
+      }).onConflictDoUpdate({ target: systemSettings.id, set: {
+        systemName: systemName,
+        companyName: companyName,
+        logoUrl: logoUrl,
+        faviconUrl: faviconUrl,
+        supportEmail: supportEmail,
+        timezone: timezone || 'UTC',
+        isInstalled: true,
+      }});
+
+      usersCache.push(adminUser); // Add to cache
+
+      res.json({ success: true, message: 'Installation completed successfully' });
+    } catch (err: any) {
+      console.error('Install Error:', err);
+      res.status(500).json({ error: 'Installation failed: ' + err.message });
+    }
+  });
+
+  app.use('/api/installer', installerRouter);
+
   // API Routes
-  
-  app.get("/api/health", (req, res) => res.json({ status: "ok" }));
+  const apiRouter = express.Router();
+  apiRouter.use(requireAuthMiddleware);
 
-  app.get("/api/system/status", (req, res) => {
-    res.json({ installed: memoryDb.settings.installed, systemName: memoryDb.settings.systemName });
+  apiRouter.get('/config', (req, res) => {
+    res.json(appConfig);
   });
 
-  app.post("/api/system/install", (req, res) => {
-    const { systemName, dbUrl: incomingDbUrl, adminEmail, sonicPesaKey, sonicPesaSecret } = req.body;
-    memoryDb.settings.systemName = systemName || "Uptime Pulse";
-    if (sonicPesaKey) memoryDb.settings.sonicPesaKey = sonicPesaKey;
-    if (sonicPesaSecret) memoryDb.settings.sonicPesaSecret = sonicPesaSecret;
-    memoryDb.settings.installed = true;
-    res.json({ success: true, message: "System installed." });
-  });
+  apiRouter.post('/config', async (req, res) => {
+    const newConfig = req.body as AppConfig;
+    let shouldRestart = false;
 
-  // Settings
-  app.post("/api/settings/general", async (req, res) => {
-    const { systemName } = req.body;
-    memoryDb.settings.systemName = systemName;
-    if (db) {
-      // Basic fallback since system_settings isn't clearly defined in schema yet,
-      // but prompt says "update memoryDb.settings.systemName (and DB system_settings table if db exists)".
-      // Assuming we just try-catch to avoid crashing if table is missing.
-      try {
-        if ('system_settings' in schema) {
-          // @ts-ignore
-          await db.insert(schema.system_settings).values({ key: 'systemName', value: systemName }).onConflictDoUpdate({ target: schema.system_settings.key, set: { value: systemName } });
-        }
-      } catch(e) {}
+    if (newConfig.intervalSeconds !== appConfig.intervalSeconds || 
+        JSON.stringify(newConfig.urls) !== JSON.stringify(appConfig.urls)) {
+      shouldRestart = true;
     }
-    res.json({ success: true });
-  });
 
-  app.post("/api/settings/integrations", async (req, res) => {
-    const { sonicPesaKey, sonicPesaSecret } = req.body;
-    memoryDb.settings.sonicPesaKey = sonicPesaKey;
-    memoryDb.settings.sonicPesaSecret = sonicPesaSecret;
-    if (db) {
-      try {
-        if ('system_settings' in schema) {
-        // @ts-ignore
-        await db.insert(schema.system_settings).values({ key: 'sonicPesaKey', value: sonicPesaKey }).onConflictDoUpdate({ target: schema.system_settings.key, set: { value: sonicPesaKey } });
-        // @ts-ignore
-        await db.insert(schema.system_settings).values({ key: 'sonicPesaSecret', value: sonicPesaSecret }).onConflictDoUpdate({ target: schema.system_settings.key, set: { value: sonicPesaSecret } });
-        }
-      } catch(e) {}
+    appConfig = { ...appConfig, ...newConfig };
+    await persistConfigToDB();
+    
+    if (shouldRestart) {
+      restartMonitoringLoop();
     }
-    res.json({ success: true });
+    
+    res.json({ message: 'Configuration saved successfully', config: appConfig });
   });
 
-  app.get("/api/settings", (req, res) => {
-    const key = memoryDb.settings.sonicPesaKey;
-    const secret = memoryDb.settings.sonicPesaSecret;
-    res.json({
-      systemName: memoryDb.settings.systemName,
-      sonicPesaKey: key ? `****${key.slice(-4)}` : "",
-      sonicPesaSecret: secret ? `****${secret.slice(-4)}` : ""
-    });
+  apiRouter.get('/logs', (req, res) => {
+    res.json(uptimeLogs);
   });
 
-  // Auth
-  app.post("/api/auth/login", (req, res) => {
-    const { email, password } = req.body;
-    if (email === "admin@example.com") {
-      res.cookie("session", "admin-token", { httpOnly: true, maxAge: 86400000 });
-      res.json({ success: true, user: { email, role: "admin" } });
-    } else {
-      res.status(401).json({ error: "Invalid credentials" });
+  apiRouter.post('/logs/clear', async (req, res) => {
+    uptimeLogs = [];
+    await clearLogsInDB();
+    res.json({ message: 'Logs cleared' });
+  });
+
+  apiRouter.get('/crawled-links', (req, res) => {
+    res.json(crawledLinksCache);
+  });
+
+  apiRouter.get('/system-settings', async (req, res) => {
+    try {
+      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      res.json(sysResult[0] || {});
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to fetch' });
     }
   });
 
-  app.get("/api/auth/me", (req, res) => {
-    if (req.cookies.session === "admin-token") {
-      res.json({ email: "admin@example.com", role: "admin" });
-    } else {
-      res.status(401).json({ error: "Unauthorized" });
+  apiRouter.post('/system-settings', async (req, res) => {
+    try {
+      const { systemName, companyName, logoUrl, faviconUrl, supportEmail, timezone } = req.body;
+      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      if (sysResult.length === 0) {
+        return res.status(404).json({ error: 'System settings not initialized' });
+      }
+
+      await db.update(systemSettings).set({
+        systemName,
+        companyName,
+        logoUrl,
+        faviconUrl,
+        supportEmail,
+        timezone
+      }).where(eq(systemSettings.id, 'main'));
+
+      res.json({ message: 'System settings updated successfully' });
+    } catch (err) {
+      res.status(500).json({ error: 'Failed to update' });
     }
   });
 
-  app.post("/api/auth/logout", (req, res) => {
-    res.clearCookie("session");
-    res.json({ success: true });
-  });
+  apiRouter.post('/crawled-links/block', async (req, res) => {
+    const { href } = req.body;
+    if (!href) return res.status(400).json({ error: 'href required' });
 
-  // Portal Auth
-  app.post("/api/portal/auth/login", (req, res) => {
-    const { email, password } = req.body;
-    if (email === "client@acmecorp.com" && password === "password") {
-      res.cookie("portal-session", "company-1-token", { httpOnly: true, maxAge: 86400000 });
-      res.json({ success: true, company: { id: 1, name: "Acme Corp" } });
-    } else {
-      res.status(401).json({ error: "Invalid credentials" });
+    if (!appConfig.blockedLinks.includes(href)) {
+      appConfig.blockedLinks.push(href);
+      await persistConfigToDB();
     }
-  });
 
-  app.get("/api/portal/auth/me", (req, res) => {
-    if (req.cookies["portal-session"] === "company-1-token") {
-      res.json({ company: { id: 1, name: "Acme Corp" } });
-    } else {
-      res.status(401).json({ error: "Unauthorized" });
-    }
-  });
-  
-  app.post("/api/portal/auth/logout", (req, res) => {
-    res.clearCookie("portal-session");
-    res.json({ success: true });
-  });
-
-  app.get("/api/portal/dashboard", (req, res) => {
-    // For Acme Corp (id: 1)
-    const companyMonitors = memoryDb.monitors.filter((m: any) => m.companyId === 1 || m.company === "Acme Corp");
-    const totalMonitors = companyMonitors.length;
-    const upCount = companyMonitors.filter((m: any) => m.status === "up").length;
-    const downCount = companyMonitors.filter((m: any) => m.status === "down").length;
-    const sumLoad = companyMonitors.reduce((acc: number, m: any) => acc + (m.avgLoadTime || 0), 0);
-    const avgResponseTime = totalMonitors > 0 ? Math.round(sumLoad / totalMonitors) : 0;
-    res.json({ totalMonitors, upCount, downCount, avgResponseTime });
-  });
-
-  app.get("/api/portal/monitors", (req, res) => {
-    res.json(memoryDb.monitors.filter((m: any) => m.companyId === 1 || m.company === "Acme Corp"));
-  });
-
-  // Monitors
-  app.get("/api/monitors", async (req, res) => {
-    if (db) {
-      try {
-        const rows = await db.select().from(schema.monitors);
-        return res.json(rows);
-      } catch(e) {
-        // Fallback to memory if table doesn't exist
+    const linksToBlock = crawledLinksCache.filter(l => l.href.includes(href));
+    for (const link of linksToBlock) {
+      if (!link.isBlocked) {
+        link.isBlocked = true;
+        await persistCrawledLinkToDB(link);
       }
     }
-    res.json(memoryDb.monitors);
+
+    res.json({ message: 'Link blocked', blockedLinks: appConfig.blockedLinks });
   });
 
-  app.post("/api/monitors", async (req, res) => {
-    const { name, url, type, companyId, checkInterval, company } = req.body;
-    if (db) {
-      try {
-        // @ts-ignore
-        const rows = await db.insert(schema.monitors).values({ name, url, type, companyId: companyId || null, checkInterval: checkInterval || 60, status: "pending" }).returning();
-        return res.json(rows[0]);
-      } catch (e) {}
+  apiRouter.post('/crawled-links/unblock', async (req, res) => {
+    const { href } = req.body;
+    if (!href) return res.status(400).json({ error: 'href required' });
+
+    appConfig.blockedLinks = appConfig.blockedLinks.filter(b => b !== href);
+    await persistConfigToDB();
+
+    const linksToUnblock = crawledLinksCache.filter(l => l.href.includes(href));
+    for (const link of linksToUnblock) {
+      const isStillBlocked = appConfig.blockedLinks.some(blk => link.href.includes(blk));
+      if (link.isBlocked && !isStillBlocked) {
+        link.isBlocked = false;
+        await persistCrawledLinkToDB(link);
+      }
     }
-    const id = memoryDb.monitors.length > 0 ? Math.max(...memoryDb.monitors.map((m: any) => m.id)) + 1 : 1;
-    const newMonitor = { id, name, url, type, companyId: Number(companyId) || 1, company: company || "Unknown", checkInterval: Number(checkInterval) || 60, status: "pending", lastChecked: Date.now(), avgLoadTime: 0 };
-    memoryDb.monitors.push(newMonitor);
-    res.json(newMonitor);
+
+    res.json({ message: 'Link unblocked', blockedLinks: appConfig.blockedLinks });
   });
 
-  app.put("/api/monitors/:id", async (req, res) => {
-    const id = Number(req.params.id);
-    const { name, url, type, status, checkInterval } = req.body;
-    if (db) {
-      try {
-        // @ts-ignore
-        const rows = await db.update(schema.monitors).set({ name, url, type, status, checkInterval }).where(eq(schema.monitors.id, id)).returning();
-        if (rows.length > 0) return res.json(rows[0]);
-      } catch(e) {}
-    }
-    const idx = memoryDb.monitors.findIndex((m: any) => m.id === id);
-    if (idx !== -1) {
-      memoryDb.monitors[idx] = { ...memoryDb.monitors[idx], ...req.body };
-      res.json(memoryDb.monitors[idx]);
-    } else {
-      res.status(404).json({ error: "Not found" });
-    }
-  });
-
-  app.delete("/api/monitors/:id", async (req, res) => {
-    const id = Number(req.params.id);
-    if (db) {
-      try {
-        // @ts-ignore
-        await db.delete(schema.monitors).where(eq(schema.monitors.id, id));
-        return res.json({ success: true });
-      } catch(e) {}
-    }
-    memoryDb.monitors = memoryDb.monitors.filter((m: any) => m.id !== id);
-    res.json({ success: true });
-  });
-
-  // Companies
-  app.get("/api/companies", async (req, res) => {
-    if (db) {
-      try {
-        if ('companies' in schema) {
-          // @ts-ignore
-          const rows = await db.select().from(schema.companies);
-          return res.json(rows);
-        }
-      } catch(e) {}
-    }
-    res.json(memoryDb.companies);
-  });
-
-  app.post("/api/companies", async (req, res) => {
-    const { name, billingPlan } = req.body;
-    if (db) {
-      try {
-        if ('companies' in schema) {
-        // @ts-ignore
-        const rows = await db.insert(schema.companies).values({ name, billingPlan }).returning();
-        return res.json(rows[0]);
-        }
-      } catch(e) {}
-    }
-    const id = memoryDb.companies.length > 0 ? Math.max(...memoryDb.companies.map((c: any) => c.id)) + 1 : 1;
-    const newCo = { id, name, billingPlan };
-    memoryDb.companies.push(newCo);
-    res.json(newCo);
-  });
-
-  // Users
-  app.get("/api/users", async (req, res) => {
-    if (db) {
-      try {
-        if ('users' in schema) {
-          // @ts-ignore
-          const rows = await db.select({ id: schema.users.id, name: schema.users.name, email: schema.users.email, role: schema.users.role }).from(schema.users);
-          return res.json(rows);
-        }
-      } catch(e) {}
-    }
-    res.json(memoryDb.users);
-  });
-
-  app.post("/api/users", async (req, res) => {
-    const { name, email, role } = req.body;
-    const passwordHash = crypto.createHash('sha256').update("changeme123").digest('hex');
-    if (db) {
-      try {
-        if ('users' in schema) {
-          // @ts-ignore
-          const rows = await db.insert(schema.users).values({ name, email, role, passwordHash }).returning({ id: schema.users.id, name: schema.users.name, email: schema.users.email, role: schema.users.role });
-          return res.json(rows[0]);
-        }
-      } catch(e) {}
-    }
-    const id = memoryDb.users.length > 0 ? Math.max(...memoryDb.users.map((c: any) => c.id)) + 1 : 1;
-    const newU = { id, name, email, role };
-    memoryDb.users.push(newU);
-    res.json(newU);
-  });
-
-  // Proxies
-  app.get("/api/proxies", async (req, res) => {
-    if (db) {
-      try {
-        if ('proxies' in schema) {
-          // @ts-ignore
-          const rows = await db.select().from(schema.proxies);
-          return res.json(rows);
-        }
-      } catch(e) {}
-    }
-    res.json(memoryDb.proxies);
-  });
-
-  app.post("/api/proxies", async (req, res) => {
-    const { label, address, groupId } = req.body;
-    if (db) {
-      try {
-        if ('proxies' in schema) {
-          // @ts-ignore
-          const rows = await db.insert(schema.proxies).values({ label, address, groupId: Number(groupId) || null, status: 'active', lastUsed: new Date() }).returning();
-          return res.json(rows[0]);
-        }
-      } catch(e) {}
-    }
-    const id = memoryDb.proxies.length > 0 ? Math.max(...memoryDb.proxies.map((c: any) => c.id)) + 1 : 1;
-    const newP = { id, label, address, groupId: Number(groupId) || null, status: 'active', lastUsed: Date.now() };
-    memoryDb.proxies.push(newP);
-    res.json(newP);
-  });
-
-  app.delete("/api/proxies/:id", async (req, res) => {
-    const id = Number(req.params.id);
-    if (db) {
-      try {
-        if ('proxies' in schema) {
-          // @ts-ignore
-          await db.delete(schema.proxies).where(eq(schema.proxies.id, id));
-          return res.json({ success: true });
-        }
-      } catch(e) {}
-    }
-    memoryDb.proxies = memoryDb.proxies.filter((p: any) => p.id !== id);
-    res.json({ success: true });
-  });
-
-  app.get("/api/live-feed", async (req, res) => {
-    if (db) {
-      try {
-        if ('sessions' in schema && 'monitors' in schema) {
-          // @ts-ignore
-          const rows = await db.select({
-            id: schema.sessions.id,
-            startedAt: schema.sessions.startedAt,
-            status: schema.sessions.status,
-            monitorId: schema.sessions.monitorId,
-            monitorName: schema.monitors.name,
-            totalDuration: schema.sessions.totalDuration,
-            proxyUsed: schema.sessions.proxyUsed
-          // @ts-ignore
-          }).from(schema.sessions).leftJoin(schema.monitors, eq(schema.sessions.monitorId, schema.monitors.id)).orderBy(desc(schema.sessions.startedAt)).limit(50);
-          return res.json(rows);
-        }
-      } catch(e) {}
-    }
-    // Memory DB join mock
-    const sorted = [...memoryDb.sessions].sort((a: any, b: any) => b.startedAt - a.startedAt).slice(0, 50);
-    const enriched = sorted.map(s => {
-      const m = memoryDb.monitors.find((m: any) => m.id.toString() === s.monitorId.toString());
-      return { ...s, monitorName: m ? m.name : "Unknown Monitor", company: m ? m.company : "" };
-    });
-    res.json(enriched);
-  });
-
-  // Real SonicPesa integration proxy
-  app.post("/api/v1/payment/create_order", async (req, res) => {
-    const { amount, phone, currency, email, name } = req.body;
-    const apiKey = memoryDb.settings.sonicPesaKey || process.env.SONICPESA_API_KEY;
-
-    if (!apiKey) {
-      return res.status(401).json({ status: "error", message: "SonicPesa API Key not configured" });
-    }
-
+  apiRouter.delete('/crawled-links/clear', async (req, res) => {
     try {
-      const sonicRes = await fetch("https://api.sonicpesa.com/api/v1/payment/create_order", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-KEY": apiKey,
-        },
-        body: JSON.stringify({
-          buyer_email: email || "customer@example.com",
-          buyer_name: name || "Customer",
-          buyer_phone: phone,
-          amount: amount,
-          currency: currency || "TZS"
-        })
-      });
-
-      const data = await sonicRes.json();
-      res.json(data);
-    } catch (err) {
-      console.error("SonicPesa integration error:", err);
-      res.status(500).json({ status: "error", message: "Failed to communicate with payment gateway" });
+      await db.delete(crawledLinksTable);
+    } catch (err: any) {
+      console.warn('Could not clear crawled links from db', err.message);
     }
+    crawledLinksCache = [];
+    res.json({ message: 'Crawled links cleared' });
   });
 
-  app.post("/api/v1/payment/order_status", async (req, res) => {
-    const { order_id } = req.body;
-    const apiKey = memoryDb.settings.sonicPesaKey || process.env.SONICPESA_API_KEY;
+  app.use('/api', apiRouter);
 
-    if (!apiKey) {
-      return res.status(401).json({ status: "error", message: "SonicPesa API Key not configured" });
-    }
+  // Load state then start monitoring automatically on launch
+  await loadStateFromDB();
+  restartMonitoringLoop();
 
-    try {
-      const sonicRes = await fetch("https://api.sonicpesa.com/api/v1/payment/order_status", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-KEY": apiKey,
-        },
-        body: JSON.stringify({ order_id })
-      });
-
-      const data = await sonicRes.json();
-      res.json(data);
-    } catch (err) {
-      res.status(500).json({ status: "error", message: "Failed to communicate with payment gateway" });
-    }
-  });
-
-  app.post("/api/webhooks/sonicpesa", (req: any, res: any) => {
-    const signature = req.headers["x-sonicpesa-signature"];
-    const apiSecret = memoryDb.settings.sonicPesaSecret || process.env.SONICPESA_API_SECRET;
-
-    if (!apiSecret) {
-      return res.status(500).send("Webhook secret not configured.");
-    }
-
-    if (!signature) {
-      return res.status(400).send("No signature block found");
-    }
-
-    const expectedSignature = crypto
-      .createHmac("sha256", apiSecret)
-      .update(req.rawBody)
-      .digest("hex");
-
-    if (signature !== expectedSignature) {
-      console.error("Webhook signature mismatch.");
-      return res.status(400).send("Invalid signature");
-    }
-
-    const payload = req.body;
-    console.log("Received Valid Webhook from SonicPesa:", payload.event);
-
-    if (payload.event === "payment.completed") {
-      console.log(`Payment successful for order: ${payload.order_id}, amount: ${payload.amount}`);
-    }
-
-    res.status(200).send("Webhook received");
-  });
-
-  app.get("/api/transactions", async (req, res) => {
-    res.json({
-        "status": "success",
-        "data": []
-    });
-  });
-
-  // --- Live Activity / Crawler API Routes ---
-  app.get("/api/monitors/:id", async (req, res) => {
-    const monitor = memoryDb.monitors.find((m: any) => m.id.toString() === req.params.id);
-    if (!monitor) return res.status(404).json({ error: "Monitor not found" });
-    res.json(monitor);
-  });
-
-  app.get("/api/monitors/:id/sessions", async (req, res) => {
-    const sessions = memoryDb.sessions.filter((s: any) => s.monitorId.toString() === req.params.id);
-    res.json(sessions);
-  });
-
-  app.post("/api/monitors/:id/run", async (req, res) => {
-    const { proxyUsed, simulateHuman, humanProfile, crawlerDepth, maxLinks, followExternal } = req.body;
-    
-    const newSession = {
-      id: Date.now().toString(),
-      monitorId: req.params.id,
-      startedAt: Date.now(),
-      status: "running",
-      proxyUsed: proxyUsed || "none",
-      simulateHuman: !!simulateHuman,
-      humanProfile: humanProfile || "none",
-      crawlerDepth: crawlerDepth || 1,
-      maxLinks: maxLinks || 50,
-      followExternal: !!followExternal,
-      linksFound: 0,
-      linksFailed: 0,
-    };
-    memoryDb.sessions.push(newSession);
-
-    memoryDb.sessionSteps.push({ id: Date.now().toString() + "-1", sessionId: newSession.id, timestamp: Date.now(), message: "Resolving DNS...", status: "info" });
-    
-    setTimeout(() => {
-      newSession.status = "passed";
-      newSession.completedAt = Date.now();
-      newSession.totalDuration = 2100;
-      newSession.linksFound = 4;
-      memoryDb.sessionSteps.push({ id: Date.now().toString() + "-2", sessionId: newSession.id, timestamp: Date.now() - 1000, message: "Page loaded. Executing JS.", status: "ok" });
-      memoryDb.sessionSteps.push({ id: Date.now().toString() + "-3", sessionId: newSession.id, timestamp: Date.now(), message: "Session complete.", status: "ok" });
-      
-      memoryDb.detectedLinks.push({ id: Date.now().toString() + "-l1", sessionId: newSession.id, url: "/api/checkout", elementType: "button", elementLabel: "Checkout", httpStatus: 200, loadTimeMs: 45, state: "discovered" });
-      memoryDb.detectedLinks.push({ id: Date.now().toString() + "-l2", sessionId: newSession.id, url: "https://docs.acmeprod.com", elementType: "a", elementLabel: "Docs", httpStatus: 200, loadTimeMs: 112, state: "discovered" });
-    }, 2000);
-
-    res.json(newSession);
-  });
-
-  app.get("/api/sessions", async (req, res) => {
-    res.json(memoryDb.sessions.sort((a: any, b: any) => b.startedAt - a.startedAt));
-  });
-
-  app.get("/api/sessions/:id", async (req, res) => {
-    const session = memoryDb.sessions.find((s: any) => s.id.toString() === req.params.id);
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    
-    const steps = memoryDb.sessionSteps.filter((s: any) => s.sessionId.toString() === req.params.id).sort((a: any, b: any) => a.timestamp - b.timestamp);
-    const links = memoryDb.detectedLinks.filter((l: any) => l.sessionId.toString() === req.params.id);
-    
-    res.json({ session, steps, links });
-  });
-
-  if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
-      appType: "spa",
+      appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+    app.get('*', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
   });
 }
