@@ -157,7 +157,11 @@ const loadStateFromDB = async () => {
       console.log(`System installed: ${sysResult[0].isInstalled}`);
     }
   } catch (err: any) {
-    console.warn('Could not load system settings from DB:', err.message || err);
+    if (err.code === '42P01') {
+      console.warn('System settings table undefined. Proceed to /install to run migrations.');
+    } else {
+      console.warn('Could not load system settings from DB:', err.message || err);
+    }
   }
 
   // Load cache of users
@@ -705,7 +709,10 @@ async function startServer() {
         return res.json({ isInstalled: false });
       }
       return res.json({ isInstalled: !!sysResult[0].isInstalled, settings: sysResult[0] });
-    } catch (err) {
+    } catch (err: any) {
+      if (err.code === '42P01') {
+        return res.json({ isInstalled: false, needsMigration: true });
+      }
       return res.status(500).json({ error: 'Failed to check system status' });
     }
   });

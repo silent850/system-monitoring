@@ -1,0 +1,218 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Company {
+  id            String         @id @default(uuid())
+  name          String
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  users         User[]
+  subscriptions Subscription[]
+  monitors      Monitor[]
+  proxyGroups   ProxyGroup[]
+  alerts        Alert[]
+}
+
+model User {
+  id             String      @id @default(uuid())
+  companyId      String
+  company        Company     @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  email          String      @unique
+  passwordHash   String
+  name           String?
+  resetToken     String?
+  resetTokenExp  DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+  userRoles      UserRole[]
+}
+
+model Role {
+  id              String           @id @default(uuid())
+  name            String           @unique
+  userRoles       UserRole[]
+  rolePermissions RolePermission[]
+}
+
+model Permission {
+  id              String           @id @default(uuid())
+  name            String           @unique
+  rolePermissions RolePermission[]
+}
+
+model UserRole {
+  userId String
+  roleId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   Role   @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+  role         Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission   Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+}
+
+model Subscription {
+  id               String    @id @default(uuid())
+  companyId        String
+  company          Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  planId           String
+  status           String
+  currentPeriodEnd DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model Monitor {
+  id              String           @id @default(uuid())
+  companyId       String
+  company         Company          @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name            String
+  url             String
+  intervalSeconds Int              @default(60)
+  isActive        Boolean          @default(true)
+  crawlEnabled    Boolean          @default(false)
+  crawlDepth      Int              @default(1)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  checks          UptimeCheck[]
+  browserSessions BrowserSession[]
+  crawledLinks    CrawledLink[]
+  alerts          Alert[]
+}
+
+model UptimeCheck {
+  id           String   @id @default(uuid())
+  monitorId    String
+  monitor      Monitor  @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status       String
+  responseTime Int?
+  errorDetails String?
+  proxyUsed    String?
+  timestamp    DateTime @default(now())
+}
+
+model BrowserSession {
+  id         String        @id @default(uuid())
+  monitorId  String
+  monitor    Monitor       @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  status     String?
+  startTime  DateTime      @default(now())
+  endTime    DateTime?
+  steps      BrowserStep[]
+}
+
+model BrowserStep {
+  id            String         @id @default(uuid())
+  sessionId     String
+  session       BrowserSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  stepName      String?
+  screenshotUrl String?
+  status        String?
+  timestamp     DateTime       @default(now())
+}
+
+model CrawledLink {
+  id           String      @id @default(uuid())
+  monitorId    String?
+  monitor      Monitor?    @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  parentUrl    String
+  href         String
+  linkText     String?
+  isStatic     Boolean     @default(false)
+  isDynamic    Boolean     @default(false)
+  lastChecked  DateTime?
+  lastStatus   String      @default("pending")
+  responseTime Int?
+  isBlocked    Boolean     @default(false)
+  depth        Int         @default(1)
+  logs         CrawlLog[]
+}
+
+model CrawlLog {
+  id            String       @id @default(uuid())
+  crawledLinkId String?
+  link          CrawledLink? @relation(fields: [crawledLinkId], references: [id], onDelete: Cascade)
+  status        String?
+  responseTime  Int?
+  errorDetails  String?
+  timestamp     DateTime     @default(now())
+}
+
+model Alert {
+  id        String   @id @default(uuid())
+  companyId String?
+  company   Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  monitorId String?
+  monitor   Monitor? @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  type      String   // E.g., email, webhook, sms
+  recipient String?
+  message   String?
+  status    String?
+  timestamp DateTime @default(now())
+}
+
+model ProxyGroup {
+  id        String    @id @default(uuid())
+  companyId String
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  name      String
+  createdAt DateTime  @default(now())
+  proxies   Proxy[]
+}
+
+model Proxy {
+  id         String     @id @default(uuid())
+  groupId    String
+  group      ProxyGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  url        String
+  isActive   Boolean    @default(true)
+  lastStatus String?
+  createdAt  DateTime   @default(now())
+}
+
+model SystemSettings {
+  id           String   @id @default("main")
+  systemName   String   @default("UptimeMonitor")
+  companyName  String   @default("")
+  logoUrl      String?
+  faviconUrl   String?
+  supportEmail String?
+  timezone     String   @default("UTC")
+  isInstalled  Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model SmtpSettings {
+  id         String  @id @default("main")
+  host       String?
+  port       Int?
+  username   String?
+  password   String?
+  encryption String?
+  fromEmail  String?
+  fromName   String?
+}
+
+model PaymentGateway {
+  id            String  @id @default("sonicpesa")
+  name          String?
+  accessKey     String?
+  secretKey     String?
+  webhookSecret String?
+  environment   String  @default("sandbox")
+  isActive      Boolean @default(false)
+}
