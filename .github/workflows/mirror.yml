@@ -27,9 +27,10 @@ jobs:
 
       - name: Clone monitoringtool
         run: |
-          git clone https://github.com/kariashangati/monitoringtool.git source
+          https://github.com/kariashangati/smartmonitorsoftware.git
 
-      - name: Copy monitoringtool files
+      - name: Copy 
+smartmonitorsoftware files
         run: |
           rsync -av source/ . \
             --exclude .git
@@ -41,6 +42,7 @@ jobs:
 
           git add -A
 
-          git commit -m "Mirror monitoringtool" || echo "No changes"
+          git commit -m "Mirror 
+smartmonitorsoftware" || echo "No changes"
 
           git push
