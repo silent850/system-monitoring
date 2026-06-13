@@ -1,4 +1,5 @@
-name: Mirror monitoringtool
+name: Mirror 
+smartmonitorsoftware
 
 on:
   schedule:
