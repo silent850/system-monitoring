@@ -720,9 +720,34 @@ async function startServer() {
   installerRouter.post('/install', async (req, res) => {
     try {
       // Check if already installed
-      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
-      if (sysResult.length > 0 && sysResult[0].isInstalled) {
-        return res.status(403).json({ error: 'System is already installed' });
+      let isMigrated = true;
+      try {
+        const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+        if (sysResult.length > 0 && sysResult[0].isInstalled) {
+          return res.status(403).json({ error: 'System is already installed' });
+        }
+      } catch (checkErr: any) {
+        if (checkErr.code === '42P01') {
+          isMigrated = false;
+        } else {
+          throw checkErr;
+        }
+      }
+
+      if (!isMigrated) {
+        // Run drizzle kit push programmatically
+        const { exec } = await import('child_process');
+        const { promisify } = await import('util');
+        const execPromise = promisify(exec);
+        
+        console.log('Running drizzle-kit push for install migration...');
+        try {
+          await execPromise('npx -y drizzle-kit push --config src/db/drizzle.config.ts');
+          console.log('Migration successful.');
+        } catch (migErr: any) {
+          console.error('Migration failed:', migErr);
+          throw new Error('Database migration failed: ' + migErr.message);
+        }
       }
 
       const {
