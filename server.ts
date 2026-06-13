@@ -147,21 +147,12 @@ const loadStateFromDB = async () => {
   try {
     const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
     if (sysResult.length === 0) {
-      // Create default unpaid/uninstalled system setting
-      await db.insert(systemSettings).values({
-        id: 'main',
-        isInstalled: false,
-      });
-      console.log('Created initial system_settings (not installed)');
+      console.log('No system_settings found. Needs installation.');
     } else {
       console.log(`System installed: ${sysResult[0].isInstalled}`);
     }
   } catch (err: any) {
-    if (err.code === '42P01') {
-      console.warn('System settings table undefined. Proceed to /install to run migrations.');
-    } else {
-      console.warn('Could not load system settings from DB:', err.message || err);
-    }
+    console.warn('System settings table or row undefined. Proceed to /install to run migrations.');
   }
 
   // Load cache of users
@@ -710,10 +701,8 @@ async function startServer() {
       }
       return res.json({ isInstalled: !!sysResult[0].isInstalled, settings: sysResult[0] });
     } catch (err: any) {
-      if (err.code === '42P01') {
-        return res.json({ isInstalled: false, needsMigration: true });
-      }
-      return res.status(500).json({ error: 'Failed to check system status' });
+      // Any error querying systemSettings means it's likely not migrated
+      return res.json({ isInstalled: false, needsMigration: true });
     }
   });
 
@@ -727,11 +716,8 @@ async function startServer() {
           return res.status(403).json({ error: 'System is already installed' });
         }
       } catch (checkErr: any) {
-        if (checkErr.code === '42P01') {
-          isMigrated = false;
-        } else {
-          throw checkErr;
-        }
+        // Any error querying systemSettings means the table is missing or invalid
+        isMigrated = false;
       }
 
       if (!isMigrated) {
