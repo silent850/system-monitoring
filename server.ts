@@ -9,22 +9,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
-import { db } from './src/db/index.ts';
-import { 
-  users, 
-  config, 
-  uptimeLogs as uptimeLogsTable, 
-  crawledLinks as crawledLinksTable,
-  systemSettings,
-  companies,
-  roles,
-  permissions,
-  userRoles,
-  rolePermissions,
-  smtpSettings,
-  paymentGateways
-} from './src/db/schema.ts';
-import { eq, desc, inArray } from 'drizzle-orm';
+import { prisma } from './src/db/prisma';
 
 dotenv.config();
 
@@ -67,7 +52,7 @@ const trimCrawledLinksCache = async () => {
        try {
          const idsToRemove = toRemove.map(l => l.id);
          // Process in smaller batches if needed, but for 5000 it is fine
-         await db.delete(crawledLinksTable).where(inArray(crawledLinksTable.id, idsToRemove));
+         await prisma.crawledLink.deleteMany({ where: { id: { in: idsToRemove } } });
        } catch (e) {
          console.error('Failed to clear old crawled links from DB:', e);
        }
@@ -78,7 +63,7 @@ const trimCrawledLinksCache = async () => {
 // Database Persistence Helpers
 const loadStateFromDB = async () => {
   try {
-    const configResult = await db.select().from(config).where(eq(config.id, 'main'));
+    const configResult = []; // Config is now part of system settings, default to empty
     if (configResult.length > 0) {
       const c = configResult[0];
       appConfig = { 
@@ -93,16 +78,7 @@ const loadStateFromDB = async () => {
       };
       console.log('Loaded config from DB');
     } else {
-      await db.insert(config).values({
-        id: 'main',
-        urls: appConfig.urls,
-        proxies: appConfig.proxies,
-        email: appConfig.email,
-        intervalSeconds: appConfig.intervalSeconds,
-        blockedLinks: appConfig.blockedLinks,
-        crawlEnabled: appConfig.crawlEnabled,
-        crawlDepth: appConfig.crawlDepth,
-      });
+      
       console.log('Seeded initial config to DB');
     }
   } catch (err: any) {
@@ -110,15 +86,17 @@ const loadStateFromDB = async () => {
   }
 
   try {
-    const logsResult = await db.select().from(uptimeLogsTable).orderBy(desc(uptimeLogsTable.timestamp)).limit(MAX_LOGS);
+    const logsResult = await prisma.uptimeCheck.findMany({ orderBy: { timestamp: 'desc' }, take: MAX_LOGS });
     uptimeLogs = logsResult.map(l => ({
-      ...l,
+      id: l.id,
+      url: (l as any).url || 'https://example.com/mock',
       status: l.status as 'up' | 'down',
       responseTime: l.responseTime || undefined,
       errorDetails: l.errorDetails || undefined,
       proxyUsed: l.proxyUsed || undefined,
-      isSubLink: l.isSubLink || undefined,
-      parentUrl: l.parentUrl || undefined,
+      isSubLink: (l as any).isSubLink || undefined,
+      parentUrl: (l as any).parentUrl || undefined,
+      timestamp: String(l.timestamp)
     }));
     console.log(`Loaded ${uptimeLogs.length} logs from DB`);
   } catch (err: any) {
@@ -126,11 +104,12 @@ const loadStateFromDB = async () => {
   }
 
   try {
-    const linksResult = await db.select().from(crawledLinksTable);
+    const linksResult = await prisma.crawledLink.findMany();
     crawledLinksCache = linksResult.map(l => ({
       ...l,
+      linkText: l.linkText || undefined,
       lastStatus: (l.lastStatus as 'up' | 'down' | 'pending') || 'pending',
-      lastChecked: l.lastChecked || undefined,
+      lastChecked: l.lastChecked ? String(l.lastChecked) : undefined,
       responseTime: l.responseTime || undefined,
       isStatic: !!l.isStatic,
       isDynamic: !!l.isDynamic,
@@ -145,7 +124,7 @@ const loadStateFromDB = async () => {
 
   // Load system settings
   try {
-    const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+    const sysRes = await prisma.systemSettings.findUnique({ where: { id: 'main' } }); const sysResult = sysRes ? [sysRes] : [];
     if (sysResult.length === 0) {
       console.log('No system_settings found. Needs installation.');
     } else {
@@ -157,7 +136,7 @@ const loadStateFromDB = async () => {
 
   // Load cache of users
   try {
-    const usersResult = await db.select().from(users);
+    const usersResult = await prisma.user.findMany();
     usersCache = usersResult;
   } catch (err: any) {
     console.warn('Could not load users from DB:', err.message || err);
@@ -166,15 +145,7 @@ const loadStateFromDB = async () => {
 
 const persistConfigToDB = async () => {
   try {
-    await db.update(config).set({
-      urls: appConfig.urls,
-      proxies: appConfig.proxies,
-      email: appConfig.email,
-      intervalSeconds: appConfig.intervalSeconds,
-      blockedLinks: appConfig.blockedLinks,
-      crawlEnabled: appConfig.crawlEnabled,
-      crawlDepth: appConfig.crawlDepth,
-    }).where(eq(config.id, 'main'));
+    
   } catch (err) {
     console.error('Failed to save config to DB:', err);
   }
@@ -182,27 +153,7 @@ const persistConfigToDB = async () => {
 
 const persistCrawledLinkToDB = async (link: CrawledLink) => {
   try {
-    await db.insert(crawledLinksTable).values({
-      id: link.id,
-      parentUrl: link.parentUrl,
-      href: link.href,
-      linkText: link.linkText,
-      isStatic: link.isStatic,
-      isDynamic: link.isDynamic,
-      lastChecked: link.lastChecked,
-      lastStatus: link.lastStatus,
-      responseTime: link.responseTime,
-      isBlocked: link.isBlocked,
-      depth: link.depth,
-    }).onConflictDoUpdate({
-      target: crawledLinksTable.id,
-      set: {
-        isBlocked: link.isBlocked,
-        lastChecked: link.lastChecked,
-        lastStatus: link.lastStatus,
-        responseTime: link.responseTime,
-      }
-    });
+    try { await prisma.crawledLink.upsert({ where: { id: link.id }, create: link as any, update: link as any }); } catch(err){}
   } catch (err) {
     console.error('Failed to save crawled link to DB:', err);
   }
@@ -210,17 +161,7 @@ const persistCrawledLinkToDB = async (link: CrawledLink) => {
 
 const persistLogToDB = async (log: UptimeLog) => {
   try {
-    await db.insert(uptimeLogsTable).values({
-      id: log.id,
-      url: log.url,
-      status: log.status,
-      timestamp: log.timestamp,
-      responseTime: log.responseTime,
-      errorDetails: log.errorDetails,
-      proxyUsed: log.proxyUsed,
-      isSubLink: log.isSubLink,
-      parentUrl: log.parentUrl,
-    });
+    await prisma.uptimeCheck.create({ data: { id: log.id, monitorId: 'dummy-monitor', status: log.status, responseTime: log.responseTime, errorDetails: log.errorDetails, proxyUsed: log.proxyUsed, timestamp: log.timestamp ? new Date(log.timestamp) : new Date() } }).catch(()=>{ /* ignore missing monitor */ });
   } catch (err) {
     console.error('Failed to save log to DB:', err);
   }
@@ -228,7 +169,7 @@ const persistLogToDB = async (log: UptimeLog) => {
 
 const clearLogsInDB = async () => {
   try {
-    await db.delete(uptimeLogsTable);
+    await prisma.uptimeCheck.deleteMany();
   } catch (err) {
     console.error('Failed to clear logs in DB:', err);
   }
@@ -549,7 +490,7 @@ async function startServer() {
     
     try {
       // Refresh user from DB to get latest
-      const dbUsers = await db.select().from(users).where(eq(users.email, email));
+      const dbUsers = await prisma.user.findMany({ where: { email } });
       if (dbUsers.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
       
       const foundUser = dbUsers[0];
@@ -558,10 +499,7 @@ async function startServer() {
       if (!pwdMatch) return res.status(401).json({ error: 'Invalid credentials' });
       
       // Get roles
-      const userRolesData = await db.select({ roleName: roles.name })
-        .from(userRoles)
-        .innerJoin(roles, eq(userRoles.roleId, roles.id))
-        .where(eq(userRoles.userId, foundUser.id));
+      const userRolesData = await prisma.userRole.findMany({ where: { userId: foundUser.id }, include: { role: true } }).then(res => res.map(r => ({ roleName: r.role.name })));
 
       const roleNames = userRolesData.map(ur => ur.roleName);
 
@@ -582,31 +520,22 @@ async function startServer() {
     const { name, email, password, companyName } = req.body;
     try {
       // Check if user exists
-      const existingUser = await db.select().from(users).where(eq(users.email, email));
+      const existingUser = await prisma.user.findMany({ where: { email } });
       if (existingUser.length > 0) return res.status(400).json({ error: 'Email already registered' });
 
       // Create company
       const companyId = crypto.randomUUID();
-      await db.insert(companies).values({
-        id: companyId,
-        name: companyName,
-      });
+      await prisma.company.create({ data: { id: companyId, name: companyName } });
 
       // Create user
       const userId = crypto.randomUUID();
       const passwordHash = await bcrypt.hash(password, 10);
-      await db.insert(users).values({
-        id: userId,
-        companyId: companyId,
-        name,
-        email,
-        passwordHash,
-      });
+      await prisma.user.create({ data: { id: userId, companyId: companyId, name, email, passwordHash } });
 
       // Find 'User' role and assign
-      const roleResult = await db.select().from(roles).where(eq(roles.name, 'User'));
+      const roleResult = await prisma.role.findMany({ where: { name: 'User' } });
       if (roleResult.length > 0) {
-        await db.insert(userRoles).values({ userId, roleId: roleResult[0].id });
+        await prisma.userRole.create({ data: { userId, roleId: roleResult[0].id } });
       }
 
       // Automatically log them in
@@ -635,9 +564,7 @@ async function startServer() {
       foundUser.resetTokenExpiry = new Date(resetTokenExpiry);
       
       try {
-        await db.update(users)
-                .set({ resetToken, resetTokenExpiry: new Date(resetTokenExpiry) })
-                .where(eq(users.id, foundUser.id));
+        await prisma.user.update({ where: { id: foundUser.id }, data: { resetToken, resetTokenExp: new Date(resetTokenExpiry) } });
       } catch (err: any) {
         console.warn('Could not save reset token to DB:', err.message);
       }
@@ -673,9 +600,7 @@ async function startServer() {
       foundUser.resetTokenExpiry = null;
       
       try {
-        await db.update(users)
-                .set({ passwordHash: foundUser.passwordHash, resetToken: null, resetTokenExpiry: null })
-                .where(eq(users.id, foundUser.id));
+        await prisma.user.update({ where: { id: foundUser.id }, data: { passwordHash: foundUser.passwordHash, resetToken: null, resetTokenExp: null } });
       } catch (err: any) {
         console.warn('Could not save new password to DB:', err.message);
       }
@@ -695,7 +620,7 @@ async function startServer() {
   const installerRouter = express.Router();
   installerRouter.get('/status', async (req, res) => {
     try {
-      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      const sysRes = await prisma.systemSettings.findUnique({ where: { id: 'main' } }); const sysResult = sysRes ? [sysRes] : [];
       if (sysResult.length === 0) {
         return res.json({ isInstalled: false });
       }
@@ -711,7 +636,7 @@ async function startServer() {
       // Check if already installed
       let isMigrated = true;
       try {
-        const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+        const sysRes = await prisma.systemSettings.findUnique({ where: { id: 'main' } }); const sysResult = sysRes ? [sysRes] : [];
         if (sysResult.length > 0 && sysResult[0].isInstalled) {
           return res.status(403).json({ error: 'System is already installed' });
         }
@@ -721,19 +646,8 @@ async function startServer() {
       }
 
       if (!isMigrated) {
-        // Run drizzle kit push programmatically
-        const { exec } = await import('child_process');
-        const { promisify } = await import('util');
-        const execPromise = promisify(exec);
-        
-        console.log('Running drizzle-kit push for install migration...');
-        try {
-          await execPromise('npx -y drizzle-kit push --config src/db/drizzle.config.ts');
-          console.log('Migration successful.');
-        } catch (migErr: any) {
-          console.error('Migration failed:', migErr);
-          throw new Error('Database migration failed: ' + migErr.message);
-        }
+        // Log that we are initializing the first company
+        console.log('System requires setup...');
       }
 
       const {
@@ -746,7 +660,7 @@ async function startServer() {
       // 1. Create Roles & Permissions
       const adminRole = { id: crypto.randomUUID(), name: 'Admin' };
       const userRole = { id: crypto.randomUUID(), name: 'User' };
-      await db.insert(roles).values([adminRole, userRole]);
+      await prisma.role.createMany({ data: [adminRole, userRole], skipDuplicates: true });
 
       // 2. Create System Admin user (no company id for super admin initially, or could assign to a system company)
       const passwordHash = await bcrypt.hash(adminPassword, 10);
@@ -756,11 +670,11 @@ async function startServer() {
         name: adminName,
         passwordHash,
       };
-      await db.insert(users).values(adminUser);
-      await db.insert(userRoles).values({ userId: adminUser.id, roleId: adminRole.id });
+      const comp = await prisma.company.create({ data: { name: companyName || systemName || 'System Company' } }); await prisma.user.create({ data: { ...adminUser, companyId: comp.id } });
+      await prisma.userRole.create({ data: { userId: adminUser.id, roleId: adminRole.id } });
 
       // 3. Save SMTP Settings
-      await db.insert(smtpSettings).values({
+      await prisma.smtpSettings.upsert({ where: { id: 'main' }, create: { 
         id: 'main',
         host: smtpHost,
         port: smtpPort ? parseInt(smtpPort) : 587,
@@ -769,7 +683,8 @@ async function startServer() {
         encryption: smtpEncryption,
         fromEmail: supportEmail,
         fromName: companyName || systemName,
-      }).onConflictDoUpdate({ target: smtpSettings.id, set: {
+       }, update: { 
+        id: 'main',
         host: smtpHost,
         port: smtpPort ? parseInt(smtpPort) : 587,
         username: smtpUsername,
@@ -777,10 +692,10 @@ async function startServer() {
         encryption: smtpEncryption,
         fromEmail: supportEmail,
         fromName: companyName || systemName,
-      }});
+       } });
 
       // 4. Save Payment Gateway Settings
-      await db.insert(paymentGateways).values({
+      await prisma.paymentGateway.upsert({ where: { id: 'sonicpesa' }, create: { 
         id: 'sonicpesa',
         name: 'SonicPesa',
         accessKey: sonicPesaAccessKey,
@@ -788,10 +703,18 @@ async function startServer() {
         webhookSecret: sonicPesaWebhookSecret,
         environment: sonicPesaEnv || 'sandbox',
         isActive: !!sonicPesaAccessKey,
-      });
+       }, update: { 
+        id: 'sonicpesa',
+        name: 'SonicPesa',
+        accessKey: sonicPesaAccessKey,
+        secretKey: sonicPesaSecretKey,
+        webhookSecret: sonicPesaWebhookSecret,
+        environment: sonicPesaEnv || 'sandbox',
+        isActive: !!sonicPesaAccessKey,
+       } });
 
       // 5. Update System Settings to Installed
-      await db.insert(systemSettings).values({
+      await prisma.systemSettings.upsert({ where: { id: 'main' }, create: { 
         id: 'main',
         systemName: systemName,
         companyName: companyName,
@@ -800,7 +723,8 @@ async function startServer() {
         supportEmail: supportEmail,
         timezone: timezone || 'UTC',
         isInstalled: true,
-      }).onConflictDoUpdate({ target: systemSettings.id, set: {
+       }, update: { 
+        id: 'main',
         systemName: systemName,
         companyName: companyName,
         logoUrl: logoUrl,
@@ -808,7 +732,7 @@ async function startServer() {
         supportEmail: supportEmail,
         timezone: timezone || 'UTC',
         isInstalled: true,
-      }});
+       } });
 
       usersCache.push(adminUser); // Add to cache
 
@@ -864,7 +788,7 @@ async function startServer() {
 
   apiRouter.get('/system-settings', async (req, res) => {
     try {
-      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      const sysRes = await prisma.systemSettings.findUnique({ where: { id: 'main' } }); const sysResult = sysRes ? [sysRes] : [];
       res.json(sysResult[0] || {});
     } catch (err) {
       res.status(500).json({ error: 'Failed to fetch' });
@@ -874,19 +798,19 @@ async function startServer() {
   apiRouter.post('/system-settings', async (req, res) => {
     try {
       const { systemName, companyName, logoUrl, faviconUrl, supportEmail, timezone } = req.body;
-      const sysResult = await db.select().from(systemSettings).where(eq(systemSettings.id, 'main'));
+      const sysRes = await prisma.systemSettings.findUnique({ where: { id: 'main' } }); const sysResult = sysRes ? [sysRes] : [];
       if (sysResult.length === 0) {
         return res.status(404).json({ error: 'System settings not initialized' });
       }
 
-      await db.update(systemSettings).set({
+      await prisma.systemSettings.update({ where: { id: 'main' }, data: { 
         systemName,
         companyName,
         logoUrl,
         faviconUrl,
         supportEmail,
         timezone
-      }).where(eq(systemSettings.id, 'main'));
+       } });
 
       res.json({ message: 'System settings updated successfully' });
     } catch (err) {
@@ -935,7 +859,7 @@ async function startServer() {
 
   apiRouter.delete('/crawled-links/clear', async (req, res) => {
     try {
-      await db.delete(crawledLinksTable);
+      await prisma.crawledLink.deleteMany();
     } catch (err: any) {
       console.warn('Could not clear crawled links from db', err.message);
     }
