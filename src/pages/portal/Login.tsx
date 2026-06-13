@@ -1,9 +1,8 @@
 import React, { useState } from "react";
 import { useNavigate } from "react-router";
 import { Activity } from "lucide-react";
-import { cn } from "../lib/utils";
 
-export default function Login() {
+export default function PortalLogin() {
   const [emailValue, setEmailValue] = useState("");
   const [passwordValue, setPasswordValue] = useState("");
   const [error, setError] = useState("");
@@ -15,14 +14,14 @@ export default function Login() {
     setLoading(true);
     setError("");
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch("/api/portal/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: emailValue, password: passwordValue })
       });
       const data = await res.json();
       if (res.ok) {
-        navigate("/admin");
+        navigate("/portal");
       } else {
         setError(data.error || "Invalid credentials");
       }
@@ -36,12 +35,12 @@ export default function Login() {
     <div className="min-h-screen bg-gray-50 flex flex-col justify-center py-12 sm:px-6 lg:px-8">
       <div className="sm:mx-auto sm:w-full sm:max-w-md">
         <div className="flex justify-center">
-          <div className="w-12 h-12 bg-slate-900 rounded-lg flex items-center justify-center shadow-lg">
+          <div className="w-12 h-12 bg-indigo-600 rounded-lg flex items-center justify-center shadow-lg">
             <Activity className="h-8 w-8 text-white" />
           </div>
         </div>
         <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-          Sign in to Uptime Pulse
+          Client Portal Login
         </h2>
       </div>
 
@@ -49,43 +48,23 @@ export default function Login() {
         <div className="bg-white py-8 px-4 shadow sm:rounded-lg sm:px-10 border border-gray-200">
           <form className="space-y-6" onSubmit={handleLogin}>
             <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Email address
-              </label>
+              <label className="block text-sm font-medium text-gray-700">Email address</label>
               <div className="mt-1">
-                <input
-                  type="email"
-                  required
-                  value={emailValue}
-                  onChange={e => setEmailValue(e.target.value)}
-                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-slate-500 focus:border-slate-500 sm:text-sm"
-                />
+                <input required type="email" value={emailValue} onChange={e => setEmailValue(e.target.value)} className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
               </div>
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Password
-              </label>
+              <label className="block text-sm font-medium text-gray-700">Password</label>
               <div className="mt-1">
-                <input
-                  type="password"
-                  required
-                  value={passwordValue}
-                  onChange={e => setPasswordValue(e.target.value)}
-                  className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-slate-500 focus:border-slate-500 sm:text-sm"
-                />
+                <input required type="password" value={passwordValue} onChange={e => setPasswordValue(e.target.value)} className="appearance-none block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" />
               </div>
             </div>
             
             {error && <p className="text-sm text-red-600">{error}</p>}
 
             <div>
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 disabled:opacity-50"
-              >
+              <button type="submit" disabled={loading} className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50">
                 {loading ? "Signing in..." : "Sign in"}
               </button>
             </div>

@@ -14,6 +14,11 @@ import Settings from "./pages/admin/Settings";
 import Users from "./pages/admin/Users";
 import Companies from "./pages/admin/Companies";
 
+import PortalLogin from "./pages/portal/Login";
+import PortalLayout from "./pages/portal/Layout";
+import PortalDashboard from "./pages/portal/Dashboard";
+import PortalMonitors from "./pages/portal/Monitors";
+
 function PlaceholderView() {
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
@@ -30,6 +35,12 @@ export default function App() {
         <Route path="/" element={<Navigate to="/admin" replace />} />
         <Route path="/install" element={<Installer />} />
         <Route path="/login" element={<Login />} />
+        
+        <Route path="/portal/login" element={<PortalLogin />} />
+        <Route path="/portal" element={<PortalLayout />}>
+          <Route index element={<PortalDashboard />} />
+          <Route path="monitors" element={<PortalMonitors />} />
+        </Route>
         
         {/* Admin Portal Layout */}
         <Route path="/admin" element={<AdminLayout />}>

@@ -1,81 +1,107 @@
-import React from "react";
-import { Users as UsersIcon, Plus, MoreVertical, Edit2, ShieldAlert } from "lucide-react";
+import React, { useState, useEffect } from "react";
+import { Plus, Users as UsersIcon } from "lucide-react";
+
+interface User { id: number; name: string; email: string; role: string; }
 
 export default function Users() {
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showModal, setShowModal] = useState(false);
+  const [adding, setAdding] = useState(false);
+
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState("Viewer");
+
+  const fetchUsers = () => {
+    setLoading(true);
+    fetch("/api/users")
+      .then(r => r.json())
+      .then(data => { setUsers(data); setLoading(false); });
+  };
+
+  useEffect(() => { fetchUsers(); }, []);
+
+  const handleAdd = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdding(true);
+    await fetch("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, email, role })
+    });
+    setAdding(false);
+    setShowModal(false);
+    setName(""); setEmail(""); setRole("Viewer");
+    fetchUsers();
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center w-full">
-        <h1 className="text-2xl font-semibold text-gray-900 dark:text-white tracking-tight flex items-center">
-          <UsersIcon className="mr-3 h-6 w-6 text-gray-400" />
-          User Management
-        </h1>
-        <button className="flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-slate-900 hover:bg-slate-800 dark:bg-slate-800 dark:hover:bg-slate-700 transition-colors">
-          <Plus className="mr-2 h-4 w-4" />
-          Invite User
-        </button>
+      <div className="sm:flex sm:items-center sm:justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold text-gray-900 dark:text-white">Users</h1>
+          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">Manage access.</p>
+        </div>
+        <div className="mt-4 sm:mt-0">
+          <button onClick={() => setShowModal(true)} className="inline-flex items-center px-4 py-2 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-slate-900 dark:bg-slate-800 hover:bg-slate-800">
+            <Plus className="mr-2 h-4 w-4" /> Invite User
+          </button>
+        </div>
       </div>
 
-      <div className="bg-white dark:bg-slate-900 shadow-sm rounded-lg border border-gray-200 dark:border-slate-800 overflow-hidden w-full transition-colors duration-200">
-        <div className="overflow-x-auto w-full">
-          <table className="min-w-full divide-y divide-gray-200 dark:divide-slate-800 w-full">
-            <thead className="bg-gray-50 dark:bg-slate-950">
+      <div className="bg-white dark:bg-slate-900 shadow-sm rounded-lg border border-gray-200 dark:border-slate-800">
+        {loading ? <div className="p-8 text-center text-gray-500">Loading...</div> : (
+          <table className="min-w-full divide-y divide-gray-200 dark:divide-slate-800">
+            <thead className="bg-gray-50 dark:bg-slate-800/50">
               <tr>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Name</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Role</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">2FA Status</th>
-                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Last Active</th>
-                <th scope="col" className="relative px-6 py-3"><span className="sr-only">Actions</span></th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Email</th>
+                <th scope="col" className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-slate-900 divide-y divide-gray-200 dark:divide-slate-800">
-              {[
-                { id: 1, name: "Admin User", email: "admin@example.com", role: "Super Admin", tfa: true, lastActive: "Just now" },
-                { id: 2, name: "Reporting Agent", email: "reports@example.com", role: "Viewer", tfa: false, lastActive: "2 days ago" },
-              ].map((user) => (
-                <tr key={user.id} className="hover:bg-gray-50 dark:hover:bg-slate-800/50 transition-colors">
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <div className="flex items-center">
-                      <div className="h-10 w-10 flex-shrink-0">
-                        <div className="h-10 w-10 rounded-full bg-slate-200 dark:bg-slate-700 flex items-center justify-center text-slate-600 dark:text-slate-300 font-bold">
-                          {user.name.charAt(0)}
-                        </div>
-                      </div>
-                      <div className="ml-4">
-                        <div className="text-sm font-medium text-gray-900 dark:text-white">{user.name}</div>
-                        <div className="text-sm text-gray-500 dark:text-gray-400">{user.email}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-slate-100 text-slate-800 dark:bg-slate-800 dark:text-slate-300">
-                      {user.role}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    {user.tfa ? (
-                      <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Enabled</span>
-                    ) : (
-                      <span className="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400 flex items-center">
-                        <ShieldAlert className="w-3 h-3 justify-center mr-1" />
-                        Disabled
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
-                    {user.lastActive}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                    <div className="flex justify-end space-x-2">
-                      <button className="text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white"><Edit2 className="h-4 w-4" /></button>
-                      <button className="text-gray-400 hover:text-gray-500 dark:hover:text-gray-300"><MoreVertical className="h-4 w-4" /></button>
-                    </div>
-                  </td>
+            <tbody className="divide-y divide-gray-200 dark:divide-slate-800">
+              {users.map(u => (
+                <tr key={u.id}>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 dark:text-white flex items-center"><UsersIcon className="mr-2 w-4 h-4 text-gray-400" /> {u.name}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{u.email}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">{u.role}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </div>
+        )}
       </div>
+
+      {showModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-lg shadow-xl w-full max-w-md p-6 border border-gray-200 dark:border-slate-700">
+            <h2 className="text-lg font-medium mb-4 text-gray-900 dark:text-white">Invite User</h2>
+            <form onSubmit={handleAdd} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Full Name</label>
+                <input required type="text" value={name} onChange={e => setName(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-slate-700 rounded-md shadow-sm sm:text-sm bg-white dark:bg-slate-800 text-white" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
+                <input required type="email" value={email} onChange={e => setEmail(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-slate-700 rounded-md shadow-sm sm:text-sm bg-white dark:bg-slate-800 text-white" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300">Role</label>
+                <select value={role} onChange={e => setRole(e.target.value)} className="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-slate-700 rounded-md shadow-sm sm:text-sm bg-white dark:bg-slate-800 text-white">
+                   <option value="Super Admin">Super Admin</option>
+                   <option value="Manager">Manager</option>
+                   <option value="Viewer">Viewer</option>
+                </select>
+              </div>
+              <div className="flex justify-end space-x-3 pt-4 border-t border-gray-200 dark:border-slate-700">
+                <button type="button" onClick={() => setShowModal(false)} className="px-4 py-2 border border-gray-300 dark:border-slate-600 rounded-md shadow-sm text-sm font-medium text-gray-700 dark:text-gray-300">Cancel</button>
+                <button type="submit" disabled={adding} className="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-slate-900 disabled:opacity-50">{adding ? "Inviting..." : "Invite"}</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
