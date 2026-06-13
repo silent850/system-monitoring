@@ -1,5 +1,4 @@
-name: Mirror 
-smartmonitorsoftware
+name: Mirror smartmonitorsoftware
 
 on:
   schedule:
@@ -26,15 +25,13 @@ jobs:
             ! -name ".github" \
             -exec rm -rf {} +
 
-      - name: Clone monitoringtool
+      - name: Clone smartmonitorsoftware
         run: |
-          https://github.com/kariashangati/smartmonitorsoftware.git
+          git clone https://github.com/kariashangati/smartmonitorsoftware.git source
 
-      - name: Copy 
-smartmonitorsoftware files
+      - name: Copy smartmonitorsoftware files
         run: |
-          rsync -av source/ . \
-            --exclude .git
+          rsync -av source/ ./ --exclude .git
 
       - name: Commit and push
         run: |
@@ -42,8 +39,6 @@ smartmonitorsoftware files
           git config user.email "github-actions@github.com"
 
           git add -A
-
-          git commit -m "Mirror 
-smartmonitorsoftware" || echo "No changes"
+          git commit -m "Mirror smartmonitorsoftware" || echo "No changes"
 
           git push
