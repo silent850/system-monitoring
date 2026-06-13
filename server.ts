@@ -29,7 +29,7 @@ async function startServer() {
   }));
 
   // In-memory pseudo DB fallback for testing / installer mode before DB exists
-  const memoryDb = {
+  const memoryDb: any = {
     settings: {
       systemName: "Uptime Pulse",
       logo: "",
@@ -41,7 +41,10 @@ async function startServer() {
       { id: 1, name: "API Production", url: "https://api.example.com/health", type: "api", status: "up", lastChecked: Date.now(), avgLoadTime: 120, company: "Acme Corp" },
       { id: 2, name: "Marketing Site", url: "https://example.com", type: "site", status: "down", lastChecked: Date.now(), avgLoadTime: 850, company: "Acme Corp" }
     ],
-    logs: []
+    logs: [],
+    sessions: [],
+    sessionSteps: [],
+    detectedLinks: []
   };
 
   // API Routes
@@ -173,6 +176,71 @@ async function startServer() {
         "status": "success",
         "data": []
     });
+  });
+
+  // --- Live Activity / Crawler API Routes ---
+  app.get("/api/monitors/:id", async (req, res) => {
+    // Real implementation would query DB. In-memory fallback:
+    const monitor = memoryDb.monitors.find((m: any) => m.id.toString() === req.params.id);
+    if (!monitor) return res.status(404).json({ error: "Monitor not found" });
+    res.json(monitor);
+  });
+
+  app.get("/api/monitors/:id/sessions", async (req, res) => {
+    const sessions = memoryDb.sessions.filter((s: any) => s.monitorId.toString() === req.params.id);
+    res.json(sessions);
+  });
+
+  app.post("/api/monitors/:id/run", async (req, res) => {
+    const { proxyUsed, simulateHuman, humanProfile, crawlerDepth, maxLinks, followExternal } = req.body;
+    
+    const newSession = {
+      id: Date.now().toString(),
+      monitorId: req.params.id,
+      startedAt: Date.now(),
+      status: "running",
+      proxyUsed: proxyUsed || "none",
+      simulateHuman: !!simulateHuman,
+      humanProfile: humanProfile || "none",
+      crawlerDepth: crawlerDepth || 1,
+      maxLinks: maxLinks || 50,
+      followExternal: !!followExternal,
+      linksFound: 0,
+      linksFailed: 0,
+    };
+    memoryDb.sessions.push(newSession);
+
+    // Mock immediate steps
+    memoryDb.sessionSteps.push({ id: Date.now().toString() + "-1", sessionId: newSession.id, timestamp: Date.now(), message: "Resolving DNS...", status: "info" });
+    
+    // Simulate finishing after 2 seconds
+    setTimeout(() => {
+      newSession.status = "passed";
+      newSession.completedAt = Date.now();
+      newSession.totalDuration = 2100;
+      newSession.linksFound = 4;
+      memoryDb.sessionSteps.push({ id: Date.now().toString() + "-2", sessionId: newSession.id, timestamp: Date.now() - 1000, message: "Page loaded. Executing JS.", status: "ok" });
+      memoryDb.sessionSteps.push({ id: Date.now().toString() + "-3", sessionId: newSession.id, timestamp: Date.now(), message: "Session complete.", status: "ok" });
+      
+      memoryDb.detectedLinks.push({ id: Date.now().toString() + "-l1", sessionId: newSession.id, url: "/api/checkout", elementType: "button", elementLabel: "Checkout", httpStatus: 200, loadTimeMs: 45, state: "discovered" });
+      memoryDb.detectedLinks.push({ id: Date.now().toString() + "-l2", sessionId: newSession.id, url: "https://docs.acmeprod.com", elementType: "a", elementLabel: "Docs", httpStatus: 200, loadTimeMs: 112, state: "discovered" });
+    }, 2000);
+
+    res.json(newSession);
+  });
+
+  app.get("/api/sessions", async (req, res) => {
+    res.json(memoryDb.sessions.sort((a: any, b: any) => b.startedAt - a.startedAt));
+  });
+
+  app.get("/api/sessions/:id", async (req, res) => {
+    const session = memoryDb.sessions.find((s: any) => s.id.toString() === req.params.id);
+    if (!session) return res.status(404).json({ error: "Session not found" });
+    
+    const steps = memoryDb.sessionSteps.filter((s: any) => s.sessionId.toString() === req.params.id).sort((a: any, b: any) => a.timestamp - b.timestamp);
+    const links = memoryDb.detectedLinks.filter((l: any) => l.sessionId.toString() === req.params.id);
+    
+    res.json({ session, steps, links });
   });
 
   // Wait for Vite to load lazily to speed up cold starts

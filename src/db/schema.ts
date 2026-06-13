@@ -47,3 +47,41 @@ export const proxies = pgTable("proxies", {
   groupId: integer("group_id"),
   lastUsedAt: timestamp("last_used_at"),
 });
+
+export const sessions = pgTable("sessions", {
+  id: serial("id").primaryKey(),
+  monitorId: integer("monitor_id").references(() => monitors.id),
+  startedAt: timestamp("started_at").defaultNow(),
+  completedAt: timestamp("completed_at"),
+  status: text("status").default("running"), // running, passed, failed
+  proxyUsed: text("proxy_used"),
+  userAgent: text("user_agent"),
+  simulateHuman: boolean("simulate_human").default(false),
+  humanProfile: text("human_profile"), // none, light, moderate
+  crawlerDepth: integer("crawler_depth").default(1),
+  maxLinks: integer("max_links").default(50),
+  followExternal: boolean("follow_external").default(false),
+  totalDuration: integer("total_duration_ms"),
+  linksFound: integer("links_found").default(0),
+  linksFailed: integer("links_failed").default(0),
+});
+
+export const sessionSteps = pgTable("session_steps", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => sessions.id),
+  timestamp: timestamp("timestamp").defaultNow(),
+  message: text("message").notNull(),
+  status: text("status").default("ok"), // ok, info, fail
+  durationMs: integer("duration_ms"),
+});
+
+export const detectedLinks = pgTable("detected_links", {
+  id: serial("id").primaryKey(),
+  sessionId: integer("session_id").references(() => sessions.id),
+  url: text("url").notNull(),
+  elementType: text("element_type").notNull(), // a, button, img
+  elementLabel: text("element_label"),
+  httpStatus: integer("http_status"),
+  loadTimeMs: integer("load_time_ms"),
+  state: text("state").default("discovered"), // discovered, ignored, blocked
+});
